@@ -875,8 +875,8 @@ class AnnotationEditor(_Theme):
         parts = path.split(os.sep)
         return os.sep.join([parts[0], '…', parts[-1]])
 
-    # Mindestbreite damit alle Toolbar-Buttons + Controls sichtbar bleiben
-    MIN_EDITOR_W = 720
+    # Mindestbreite für sinnvolle Bedienung (Export-Bar / Filmstrip)
+    MIN_EDITOR_W = 520
 
     def show(self, entry_id: str | None = None):
         self._current_entry_id = entry_id
@@ -889,7 +889,7 @@ class AnnotationEditor(_Theme):
         win_w  = max(self.MIN_EDITOR_W, min(iw + 120, int(sw * 0.9)))
         win_h  = min(ih + 280, int(sh * 0.92))
         self.win.geometry(f'{win_w}x{win_h}')
-        self.win.minsize(self.MIN_EDITOR_W, 480)
+        self.win.minsize(self.MIN_EDITOR_W, 400)
 
         self._setup_styles()
         self._build_menu()
@@ -909,12 +909,13 @@ class AnnotationEditor(_Theme):
 
         # ── Werkzeug-Buttons (kompakt, Zeile 1) ──────────────────────
         self._style.configure('Tool.TButton',
-            font=(FONT_FAMILY, 13),
-            padding=(6, 4),
+            font=(FONT_FAMILY, 14),
+            padding=(2, 3),
             relief='flat',
             background=self.BTN_NORM,
             foreground=self.BTN_FG,
-            borderwidth=0)
+            borderwidth=0,
+            width=2)
         self._style.map('Tool.TButton',
             background=[('active', self.ACCENT_LIGHT),
                         ('pressed', self.ACCENT)],
@@ -923,12 +924,13 @@ class AnnotationEditor(_Theme):
 
         # Werkzeug selektiert
         self._style.configure('ToolSel.TButton',
-            font=(FONT_FAMILY, 13),
-            padding=(6, 4),
+            font=(FONT_FAMILY, 14),
+            padding=(2, 3),
             relief='flat',
             background=self.ACCENT,
             foreground='white',
-            borderwidth=0)
+            borderwidth=0,
+            width=2)
         self._style.map('ToolSel.TButton',
             background=[('active', self.ACCENT_HOV),
                         ('pressed', self.ACCENT_HOV)])
@@ -1052,43 +1054,51 @@ class AnnotationEditor(_Theme):
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
     def _build_toolbar(self):
-        toolbar_wrap = tk.Frame(self.win, bg=self.BG_TOOLBAR)
-        toolbar_wrap.pack(side='top', fill='x')
+        self._toolbar_wrap = tk.Frame(self.win, bg=self.BG_TOOLBAR)
+        self._toolbar_wrap.pack(side='top', fill='x')
+        self._reflow_guard = False
 
-        # ════════ Zeile 1: Werkzeuge ══════════════════════════════════
-        row1 = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
-        row1.pack(fill='x', padx=10, pady=(6, 0))
+        # ════════ Zeile 1: Werkzeuge (Flow-Layout) ═══════════════════
+        self._row1 = tk.Frame(self._toolbar_wrap, bg=self.BG_TOOLBAR,
+                              height=36)
+        self._row1.pack(fill='x', padx=10, pady=(6, 2))
+        self._row1.pack_propagate(False)
 
         self._tool_buttons: dict[str, ttk.Button] = {}
+        self._row1_items: list[tk.Widget] = []
+
         for tool_id, symbol, label in self.TOOLS:
-            btn = ttk.Button(row1, text=symbol, style='Tool.TButton',
+            btn = ttk.Button(self._row1, text=symbol, style='Tool.TButton',
                              command=lambda t=tool_id: self._select_tool(t),
                              cursor='hand2')
-            btn.pack(side='left', padx=1)
             self._tool_buttons[tool_id] = btn
+            self._row1_items.append(btn)
             self._add_tooltip(btn, label)
 
-        # Bildgröße rechts in Zeile 1
+        # Bildgröße als letztes Item im Flow
         iw, ih = self.image.size
         self._size_label = tk.Label(
-            row1, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
+            self._row1, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
             fg=self.FG_MUTED, font=(FONT_FAMILY, 9))
-        self._size_label.pack(side='right', padx=(0, 4))
+        self._row1_items.append(self._size_label)
 
-        # Thin divider between rows
-        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
-            fill='x', padx=10, pady=0)
+        # Divider zwischen den Zeilen
+        tk.Frame(self._toolbar_wrap, bg=self.DIVIDER, height=1).pack(
+            fill='x', padx=10)
 
-        # ════════ Zeile 2: Controls ═══════════════════════════════════
-        row2 = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
-        row2.pack(fill='x', padx=10, pady=(4, 6))
+        # ════════ Zeile 2: Controls (Flow-Layout) ════════════════════
+        self._row2 = tk.Frame(self._toolbar_wrap, bg=self.BG_TOOLBAR,
+                              height=32)
+        self._row2.pack(fill='x', padx=10, pady=(4, 6))
+        self._row2.pack_propagate(False)
+
+        self._row2_items: list[tk.Widget] = []
 
         # ── Farb-Swatch ──────────────────────────────────────────────
         self._color_swatch = tk.Frame(
-            row2, bg=self.tool_color, width=32, height=22,
+            self._row2, bg=self.tool_color, width=32, height=22,
             highlightthickness=2, highlightbackground=self.DIVIDER,
             cursor='hand2')
-        self._color_swatch.pack(side='left', padx=(0, 4))
         self._color_swatch.pack_propagate(False)
         self._color_swatch.bind('<Button-1>', lambda e: self._pick_color())
         self._color_swatch.bind('<Enter>',
@@ -1098,52 +1108,92 @@ class AnnotationEditor(_Theme):
             lambda e: self._color_swatch.config(
                 highlightbackground=self.DIVIDER))
         self._add_tooltip(self._color_swatch, 'Farbe wählen')
+        self._row2_items.append(self._color_swatch)
 
-        self._toolbar_sep(row2)
-
-        # ── Strichbreite / Schrift / Blur (inline) ────────────────────
+        # ── Strichbreite / Schrift / Blur (jeweils als Gruppe) ───────
         for label_text, var_name, default, lo, hi, cmd in [
             ('Breite',  '_width_var', self.tool_width,  1, 20, '_update_width'),
             ('Schrift', '_font_var',  self.font_size,   8, 72, '_update_font'),
             ('Blur',    '_blur_var',  self.blur_radius,  1, 50, '_update_blur'),
         ]:
-            tk.Label(row2, text=label_text, bg=self.BG_TOOLBAR,
+            grp = tk.Frame(self._row2, bg=self.BG_TOOLBAR)
+            tk.Label(grp, text=label_text, bg=self.BG_TOOLBAR,
                      fg=self.FG_MUTED, font=(FONT_FAMILY, 8)
-                     ).pack(side='left', padx=(4, 2))
+                     ).pack(side='left', padx=(2, 1))
             var = tk.IntVar(value=default)
             setattr(self, var_name, var)
-            tk.Spinbox(row2, from_=lo, to=hi, textvariable=var,
+            tk.Spinbox(grp, from_=lo, to=hi, textvariable=var,
                        width=3, font=(FONT_FAMILY, 9), relief='flat',
                        bg=self.BTN_NORM, fg=self.FG_MAIN,
                        buttonbackground=self.BTN_NORM,
                        command=getattr(self, cmd)
-                       ).pack(side='left', padx=(0, 4))
-
-        self._toolbar_sep(row2)
+                       ).pack(side='left', padx=(0, 2))
+            self._row2_items.append(grp)
 
         # ── Undo / Redo ──────────────────────────────────────────────
-        self._undo_btn = ttk.Button(row2, text='↩ Zurück',
+        self._undo_btn = ttk.Button(self._row2, text='↩ Zurück',
             style='UndoRedo.TButton', command=self._undo,
             state='disabled', cursor='hand2')
-        self._undo_btn.pack(side='left', padx=2)
+        self._row2_items.append(self._undo_btn)
         self._add_tooltip(self._undo_btn, 'Rückgängig  ⌘Z')
 
-        self._redo_btn = ttk.Button(row2, text='↪ Vor',
+        self._redo_btn = ttk.Button(self._row2, text='↪ Vor',
             style='UndoRedo.TButton', command=self._redo,
             state='disabled', cursor='hand2')
-        self._redo_btn.pack(side='left', padx=2)
+        self._row2_items.append(self._redo_btn)
         self._add_tooltip(self._redo_btn, 'Wiederherstellen  ⌘Y')
 
         # Bottom divider
-        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
+        tk.Frame(self._toolbar_wrap, bg=self.DIVIDER, height=1).pack(
             side='bottom', fill='x')
+
+        # ── Responsive Reflow registrieren ───────────────────────────
+        self._row1.bind('<Configure>',
+            lambda e: self._reflow_row(self._row1, self._row1_items))
+        self._row2.bind('<Configure>',
+            lambda e: self._reflow_row(self._row2, self._row2_items))
+
+        # Initiales Layout erzwingen
+        self._toolbar_wrap.update_idletasks()
+        self._reflow_row(self._row1, self._row1_items)
+        self._reflow_row(self._row2, self._row2_items)
 
         self._select_tool('arrow')
 
-    @staticmethod
-    def _toolbar_sep(parent):
-        tk.Frame(parent, bg='#CBD5E1', width=1).pack(
-            side='left', fill='y', padx=8, pady=1)
+    def _reflow_row(self, frame: tk.Frame, items: list[tk.Widget]):
+        """Responsive Flow-Layout: Widgets umbrechen bei Platzmangel."""
+        if self._reflow_guard:
+            return
+        self._reflow_guard = True
+        try:
+            avail_w = frame.winfo_width()
+            if avail_w <= 1:
+                return
+
+            GAP = 3
+            x, y = 0, 0
+            row_h = 0
+
+            for widget in items:
+                widget.update_idletasks()
+                ww = widget.winfo_reqwidth()
+                wh = widget.winfo_reqheight()
+
+                # Umbruch auf nächste Zeile wenn kein Platz
+                if x > 0 and x + ww > avail_w:
+                    x = 0
+                    y += row_h + GAP
+                    row_h = 0
+
+                widget.place(x=x, y=y)
+                x += ww + GAP
+                row_h = max(row_h, wh)
+
+            need_h = y + row_h + 2
+            if need_h > 0 and abs(need_h - frame.winfo_height()) > 2:
+                frame.config(height=need_h)
+        finally:
+            self._reflow_guard = False
 
     def _build_canvas(self):
         frame = tk.Frame(self.win, bg=self.BG_MAIN)
@@ -2004,6 +2054,9 @@ class AnnotationEditor(_Theme):
         # Viewport auf (0,0) zurücksetzen (wichtig nach Crop)
         self.canvas.xview_moveto(0)
         self.canvas.yview_moveto(0)
+        # Bildgröße in Toolbar aktualisieren
+        if hasattr(self, '_size_label'):
+            self._size_label.config(text=f'{iw} × {ih} px')
         for ann in self.annotations:
             self._draw_annotation_on_canvas(ann)
 
