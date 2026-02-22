@@ -1563,7 +1563,8 @@ class AnnotationEditor(_Theme):
 
     def _rebind_mouse(self):
         """Stellt die Standard-Maus-Bindings wieder her (nach Callout etc.)."""
-        self.canvas.bind('<ButtonPress-1>', self._on_mouse_down)
+        if self.canvas:
+            self.canvas.bind('<ButtonPress-1>', self._on_mouse_down)
 
     def _select_tool(self, tool_id: str):
         self.active_tool = tool_id
@@ -1621,6 +1622,8 @@ class AnnotationEditor(_Theme):
 
     def _draw_selection_rect(self, ann: Annotation):
         """Zeichnet einen gestrichelten Auswahlrahmen um die Annotation."""
+        if not self.canvas:
+            return
         self.canvas.delete('selection')
         if ann.kind == 'freehand' and ann.points:
             xs = [p[0] for p in ann.points]
@@ -1648,7 +1651,8 @@ class AnnotationEditor(_Theme):
         """Hebt die aktuelle Auswahl auf."""
         self._selected_idx = None
         self._move_dragging = False
-        self.canvas.delete('selection')
+        if self.canvas:
+            self.canvas.delete('selection')
 
     # ------------------------------------------------------------------
     # Maus-Events
