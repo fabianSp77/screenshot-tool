@@ -31,7 +31,7 @@ import tempfile
 import time
 import tkinter as tk
 from tkinter import filedialog, simpledialog, colorchooser, messagebox
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
 
@@ -647,8 +647,11 @@ class Annotation:
     width:     int = 3
     text:      str = ''
     font_size: int = 16
-    tail_x:    int = 0
-    tail_y:    int = 0
+    tail_x:      int = 0
+    tail_y:      int = 0
+    points:      list = field(default_factory=list)
+    blur_radius: int = 15
+    number:      int = 0
 
 
 class AnnotationEditor:
@@ -663,6 +666,10 @@ class AnnotationEditor:
         ('highlight', '▓',  'Markierung'),
         ('blur',      '≋',  'Weichzeichner'),
         ('blackout',  '■',  'Schwärzung'),
+        ('ellipse',   '◯',  'Ellipse'),
+        ('freehand',  '✏',  'Freihand'),
+        ('step',      '①',  'Schritt'),
+        ('crop',      '⬒',  'Zuschneiden'),
     ]
 
     # Helles Design – Farben (verfeinerte Palette)
@@ -704,6 +711,9 @@ class AnnotationEditor:
         self._drag_item  = None
         self._drag_start = (0, 0)
         self._tmp_photo  = None
+        self._freehand_points: list[tuple[int, int]] = []
+        self._step_counter = 0
+        self.blur_radius = 15
 
         self._thumb_photos: list[ImageTk.PhotoImage] = []
         self._current_entry_id: str | None = None
@@ -722,6 +732,9 @@ class AnnotationEditor:
         self.image = image.copy()
         self.annotations.clear()
         self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._step_counter = 0
+        self._update_undo_redo_state()
         self._redraw_canvas()
         self._refresh_filmstrip()
         self.win.lift()
@@ -873,28 +886,41 @@ class AnnotationEditor:
                    buttonbackground=self.BTN_NORM,
                    command=self._update_font).pack(side='left')
 
+        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
+            side='left', fill='y', padx=8, pady=2)
+
+        # Blur-Stärke
+        tk.Label(inner, text='Blur', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
+                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
+        self._blur_var = tk.IntVar(value=self.blur_radius)
+        tk.Spinbox(inner, from_=1, to=50, textvariable=self._blur_var,
+                   width=3, font=(FONT_FAMILY, 9), relief='flat',
+                   bg=self.BTN_NORM, fg=self.FG_MAIN,
+                   buttonbackground=self.BTN_NORM,
+                   command=self._update_blur).pack(side='left')
+
         # ── Undo / Redo – Mitte ───────────────────────────────────────
         tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', padx=8, pady=2)
 
-        undo_btn = tk.Button(inner, text='↩  Zurück',
+        self._undo_btn = tk.Button(inner, text='↩  Zurück',
             font=(FONT_FAMILY, 9),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
             relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
-            command=self._undo)
-        undo_btn.pack(side='left', padx=1)
-        self._add_hover(undo_btn, self.BTN_HOV, self.FG_MAIN,
+            command=self._undo, state='disabled')
+        self._undo_btn.pack(side='left', padx=1)
+        self._add_hover(self._undo_btn, self.BTN_HOV, self.FG_MAIN,
                         self.BTN_NORM, self.BTN_FG)
 
-        redo_btn = tk.Button(inner, text='↪  Vor',
+        self._redo_btn = tk.Button(inner, text='↪  Vor',
             font=(FONT_FAMILY, 9),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
             relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
-            command=self._redo)
-        redo_btn.pack(side='left', padx=1)
-        self._add_hover(redo_btn, self.BTN_HOV, self.FG_MAIN,
+            command=self._redo, state='disabled')
+        self._redo_btn.pack(side='left', padx=1)
+        self._add_hover(self._redo_btn, self.BTN_HOV, self.FG_MAIN,
                         self.BTN_NORM, self.BTN_FG)
 
         # ── Aktions-Buttons rechts ────────────────────────────────────
@@ -945,6 +971,8 @@ class AnnotationEditor:
         self.canvas.bind('<ButtonPress-1>',   self._on_mouse_down)
         self.canvas.bind('<B1-Motion>',        self._on_mouse_drag)
         self.canvas.bind('<ButtonRelease-1>', self._on_mouse_up)
+        self.canvas.bind('<Button-2>', self._on_right_click)
+        self.canvas.bind('<Button-3>', self._on_right_click)
 
     def _build_filmstrip(self):
         STRIP_H = 132
@@ -1068,9 +1096,12 @@ class AnnotationEditor:
         self._autosave()
         self._current_entry_id = entry_id
         self.undo_stack.clear()
+        self.redo_stack.clear()
         self.annotations.clear()
+        self._step_counter = 0
         self.image = img
         self._redraw_canvas()
+        self._update_undo_redo_state()
         self._status_var.set('Bild aus Verlauf geladen')
 
     def _delete_history_entry(self, entry_id: str):
@@ -1126,6 +1157,9 @@ class AnnotationEditor:
     def _update_font(self):
         self.font_size = self._font_var.get()
 
+    def _update_blur(self):
+        self.blur_radius = self._blur_var.get()
+
     def _update_status(self):
         labels = {t[0]: t[2] for t in self.TOOLS}
         self._status_var.set(
@@ -1150,12 +1184,21 @@ class AnnotationEditor:
             self._drawing = False
         elif self.active_tool == 'callout':
             self._handle_callout_start(x, y)
+        elif self.active_tool == 'freehand':
+            self._freehand_points = [(x, y)]
+        elif self.active_tool == 'step':
+            self._handle_step(x, y)
+            self._drawing = False
 
     def _on_mouse_drag(self, event):
         if not self._drawing:
             return
         x, y    = self._canvas_coords(event)
         x0, y0  = self._drag_start
+        if self.active_tool == 'freehand':
+            self._freehand_points.append((x, y))
+            self._draw_freehand_preview()
+            return
         self._draw_preview(x0, y0, x, y)
 
     def _on_mouse_up(self, event):
@@ -1164,10 +1207,24 @@ class AnnotationEditor:
         self._drawing = False
         x, y   = self._canvas_coords(event)
         x0, y0 = self._drag_start
+        if self.active_tool == 'freehand':
+            self._freehand_points.append((x, y))
+            if len(self._freehand_points) > 2:
+                ann = Annotation(kind='freehand', color=self.tool_color,
+                                 width=self.tool_width,
+                                 points=list(self._freehand_points))
+                self._commit(ann)
+            self._freehand_points.clear()
+            self._clear_preview()
+            return
         if abs(x - x0) < 2 and abs(y - y0) < 2:
             self._clear_preview()
             return
         if self.active_tool == 'callout':
+            return
+        if self.active_tool == 'crop':
+            self._handle_crop(x0, y0, x, y)
+            self._clear_preview()
             return
         ann = self._make_annotation(x0, y0, x, y)
         if ann:
@@ -1193,6 +1250,19 @@ class AnnotationEditor:
         elif tool == 'rect':
             self.canvas.create_rectangle(x0, y0, x1, y1, outline=c, width=w,
                                          tag='preview')
+        elif tool == 'ellipse':
+            self.canvas.create_oval(x0, y0, x1, y1, outline=c, width=w,
+                                    tag='preview')
+        elif tool == 'crop':
+            self.canvas.create_rectangle(x0, y0, x1, y1,
+                                         outline='#00D4FF', width=2,
+                                         dash=(6, 4), tag='preview')
+            lbl = f'{abs(x1 - x0)} × {abs(y1 - y0)} px'
+            self.canvas.create_text(min(x0, x1) + 4,
+                                     min(y0, y1) - 18,
+                                     text=lbl, fill='#00D4FF',
+                                     font=(FONT_FAMILY, 10, 'bold'),
+                                     anchor='nw', tag='preview')
         elif tool in ('highlight', 'blur', 'blackout'):
             fill = c if tool == 'highlight' else (
                 'gray' if tool == 'blur' else 'black')
@@ -1202,6 +1272,17 @@ class AnnotationEditor:
                 outline=c if tool == 'highlight' else fill,
                 fill=fill, stipple=stip, width=1, tag='preview')
 
+    def _draw_freehand_preview(self):
+        self.canvas.delete('preview')
+        if len(self._freehand_points) < 2:
+            return
+        coords = []
+        for px, py in self._freehand_points:
+            coords.extend([px, py])
+        self.canvas.create_line(*coords, fill=self.tool_color,
+                                width=self.tool_width, smooth=True,
+                                tag='preview')
+
     def _clear_preview(self):
         self.canvas.delete('preview')
 
@@ -1210,12 +1291,15 @@ class AnnotationEditor:
     # ------------------------------------------------------------------
 
     def _make_annotation(self, x0, y0, x1, y1) -> Annotation | None:
-        if self.active_tool not in ('arrow', 'line', 'rect',
+        if self.active_tool not in ('arrow', 'line', 'rect', 'ellipse',
                                     'highlight', 'blur', 'blackout'):
             return None
-        return Annotation(kind=self.active_tool,
-                          x1=x0, y1=y0, x2=x1, y2=y1,
-                          color=self.tool_color, width=self.tool_width)
+        ann = Annotation(kind=self.active_tool,
+                         x1=x0, y1=y0, x2=x1, y2=y1,
+                         color=self.tool_color, width=self.tool_width)
+        if self.active_tool == 'blur':
+            ann.blur_radius = self.blur_radius
+        return ann
 
     def _handle_text(self, x, y):
         text = simpledialog.askstring('Text eingeben', 'Beschriftung:',
@@ -1251,27 +1335,115 @@ class AnnotationEditor:
         self._drawing = False
         self._update_status()
 
+    def _handle_step(self, x, y):
+        self._step_counter += 1
+        r = max(16, self.font_size)
+        self._commit(Annotation(
+            kind='step', x1=x, y1=y, x2=x + r * 2, y2=y + r * 2,
+            color=self.tool_color, font_size=self.font_size,
+            number=self._step_counter))
+
+    def _handle_crop(self, x0, y0, x1, y1):
+        cx1, cy1 = min(x0, x1), min(y0, y1)
+        cx2, cy2 = max(x0, x1), max(y0, y1)
+        iw, ih = self.image.size
+        cx1, cy1 = max(0, cx1), max(0, cy1)
+        cx2, cy2 = min(iw, cx2), min(ih, cy2)
+        if cx2 - cx1 < 10 or cy2 - cy1 < 10:
+            return
+        # Alle Annotationen in das aktuelle Bild einbacken, dann zuschneiden
+        self.undo_stack.append([a for a in self.annotations])
+        self.redo_stack.clear()
+        if self.annotations:
+            self.image = self._composite_image()
+            self.annotations.clear()
+        self.image = self.image.crop((cx1, cy1, cx2, cy2))
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set(f'Zugeschnitten auf {cx2-cx1} × {cy2-cy1} px')
+
+    def _on_right_click(self, event):
+        x, y = self._canvas_coords(event)
+        # Finde die letzte (oberste) Annotation unter dem Klick
+        hit_idx = None
+        for i in range(len(self.annotations) - 1, -1, -1):
+            ann = self.annotations[i]
+            if ann.kind == 'freehand':
+                # Prüfe ob Punkt in der Nähe eines Freehand-Segments liegt
+                for px, py in ann.points:
+                    if abs(px - x) < 10 and abs(py - y) < 10:
+                        hit_idx = i
+                        break
+                if hit_idx is not None:
+                    break
+            elif ann.kind == 'step':
+                r = max(16, ann.font_size)
+                cx, cy = ann.x1 + r, ann.y1 + r
+                if (x - cx) ** 2 + (y - cy) ** 2 <= (r + 4) ** 2:
+                    hit_idx = i
+                    break
+            elif ann.kind == 'text':
+                # Ungefährer Treffer-Test für Text
+                tw = len(ann.text) * ann.font_size * 0.6
+                th = ann.font_size * 1.4
+                if ann.x1 <= x <= ann.x1 + tw and ann.y1 <= y <= ann.y1 + th:
+                    hit_idx = i
+                    break
+            else:
+                ax1, ay1 = min(ann.x1, ann.x2), min(ann.y1, ann.y2)
+                ax2, ay2 = max(ann.x1, ann.x2), max(ann.y1, ann.y2)
+                if ax1 - 5 <= x <= ax2 + 5 and ay1 - 5 <= y <= ay2 + 5:
+                    hit_idx = i
+                    break
+
+        if hit_idx is None:
+            return
+        menu = tk.Menu(self.canvas, tearoff=0)
+        menu.add_command(
+            label='Annotation löschen',
+            command=lambda idx=hit_idx: self._delete_annotation(idx))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_annotation(self, idx: int):
+        self.undo_stack.append([a for a in self.annotations])
+        self.redo_stack.clear()
+        del self.annotations[idx]
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set('Annotation gelöscht')
+
     # ------------------------------------------------------------------
     # Undo / Commit
     # ------------------------------------------------------------------
 
     def _commit(self, ann: Annotation):
         self.undo_stack.append([a for a in self.annotations])
-        self.redo_stack.clear()   # Neue Aktion löscht Redo-Verlauf
+        self.redo_stack.clear()
         self.annotations.append(ann)
         self._redraw_canvas()
+        self._update_undo_redo_state()
 
     def _undo(self):
         if self.undo_stack:
             self.redo_stack.append([a for a in self.annotations])
             self.annotations = self.undo_stack.pop()
             self._redraw_canvas()
+            self._update_undo_redo_state()
 
     def _redo(self):
         if self.redo_stack:
             self.undo_stack.append([a for a in self.annotations])
             self.annotations = self.redo_stack.pop()
             self._redraw_canvas()
+            self._update_undo_redo_state()
+
+    def _update_undo_redo_state(self):
+        if hasattr(self, '_undo_btn'):
+            self._undo_btn.config(
+                state='normal' if self.undo_stack else 'disabled')
+        if hasattr(self, '_redo_btn'):
+            self._redo_btn.config(
+                state='normal' if self.redo_stack else 'disabled')
 
     # ------------------------------------------------------------------
     # Canvas-Redraw
@@ -1316,6 +1488,24 @@ class AnnotationEditor:
             self.canvas.create_text(ann.x1 + 6, ann.y1 + 6,
                 text=ann.text, fill=c,
                 font=(FONT_FAMILY, ann.font_size), anchor='nw', tag=tag)
+        elif ann.kind == 'ellipse':
+            self.canvas.create_oval(ann.x1, ann.y1, ann.x2, ann.y2,
+                outline=c, width=w, tag=tag)
+        elif ann.kind == 'freehand':
+            if len(ann.points) >= 2:
+                coords = []
+                for px, py in ann.points:
+                    coords.extend([px, py])
+                self.canvas.create_line(*coords, fill=c, width=w,
+                    smooth=True, tag=tag)
+        elif ann.kind == 'step':
+            r = max(16, ann.font_size)
+            cx, cy = ann.x1 + r, ann.y1 + r
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                fill=c, outline='white', width=2, tag=tag)
+            self.canvas.create_text(cx, cy, text=str(ann.number),
+                fill='white', font=(FONT_FAMILY, ann.font_size, 'bold'),
+                tag=tag)
         elif ann.kind == 'highlight':
             self.canvas.create_rectangle(ann.x1, ann.y1, ann.x2, ann.y2,
                 fill=c, stipple='gray50', outline='', tag=tag)
@@ -1373,6 +1563,25 @@ class AnnotationEditor:
             font = _get_truetype_font(ann.font_size)
             draw.text((ann.x1 + 6, ann.y1 + 6), ann.text,
                       fill=c, font=font)
+        elif ann.kind == 'ellipse':
+            draw.ellipse([(ann.x1, ann.y1), (ann.x2, ann.y2)],
+                         outline=c, width=w)
+        elif ann.kind == 'freehand':
+            if len(ann.points) >= 2:
+                for i in range(len(ann.points) - 1):
+                    draw.line([ann.points[i], ann.points[i + 1]],
+                              fill=c, width=w)
+        elif ann.kind == 'step':
+            r = max(16, ann.font_size)
+            cx, cy = ann.x1 + r, ann.y1 + r
+            draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)],
+                         fill=c, outline=(255, 255, 255, 255), width=2)
+            font = _get_truetype_font(ann.font_size)
+            bbox = font.getbbox(str(ann.number))
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            draw.text((cx - tw // 2, cy - th // 2 - bbox[1]),
+                      str(ann.number), fill=(255, 255, 255, 255), font=font)
         elif ann.kind == 'highlight':
             overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
             ov_draw = ImageDraw.Draw(overlay)
@@ -1384,7 +1593,8 @@ class AnnotationEditor:
             x2, y2 = max(ann.x1, ann.x2), max(ann.y1, ann.y2)
             if x2 > x1 and y2 > y1:
                 region  = img.crop((x1, y1, x2, y2))
-                blurred = region.filter(ImageFilter.GaussianBlur(radius=15))
+                blurred = region.filter(
+                    ImageFilter.GaussianBlur(radius=ann.blur_radius))
                 img.paste(blurred, (x1, y1))
         elif ann.kind == 'blackout':
             x1, y1 = min(ann.x1, ann.x2), min(ann.y1, ann.y2)
@@ -1404,11 +1614,15 @@ class AnnotationEditor:
             parent=self.win, defaultextension='.png',
             initialfile=default,
             filetypes=[('PNG-Bild', '*.png'), ('JPEG-Bild', '*.jpg'),
+                       ('PDF-Dokument', '*.pdf'),
                        ('Alle Dateien', '*.*')])
         if not path:
             return
         img = self._composite_image()
-        if path.lower().endswith(('.jpg', '.jpeg')):
+        if path.lower().endswith('.pdf'):
+            rgb = img.convert('RGB')
+            rgb.save(path, 'PDF', resolution=150)
+        elif path.lower().endswith(('.jpg', '.jpeg')):
             img.convert('RGB').save(path, quality=95)
         else:
             img.save(path)
@@ -1577,6 +1791,7 @@ class ScreenshotApp:
         self._capturing    = False
         self._active_editor = None
         self._hotkey_listener = None
+        self._timer_seconds = 0
 
         self.engine  = CaptureEngine()
         self.history = HistoryManager()
@@ -1641,6 +1856,23 @@ class ScreenshotApp:
             btn.bind('<Leave>',
                      lambda e, b=btn: b.config(bg=self.BTN_NORM,
                                                fg=self.BTN_FG))
+
+        tk.Frame(bar, bg=self.DIVIDER, width=1).pack(
+            side='left', fill='y', pady=10, padx=4)
+
+        # Timer
+        timer_cell = tk.Frame(bar, bg=self.BG_TOP)
+        timer_cell.pack(side='left', padx=4, pady=6)
+        tk.Label(timer_cell, text='⏱', bg=self.BG_TOP, fg=self.ACCENT,
+                 font=(FONT_FAMILY, 10)).pack(side='left')
+        self._timer_var = tk.StringVar(value='0s')
+        timer_menu = tk.OptionMenu(timer_cell, self._timer_var,
+                                   '0s', '3s', '5s', '10s',
+                                   command=self._on_timer_change)
+        timer_menu.config(font=(FONT_FAMILY, 9), bg=self.BTN_NORM,
+                          fg=self.BTN_FG, relief='flat', bd=0,
+                          highlightthickness=0)
+        timer_menu.pack(side='left')
 
         tk.Frame(bar, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', pady=10, padx=4)
@@ -1712,6 +1944,29 @@ class ScreenshotApp:
             self._set_status(f'Hotkeys nicht verfügbar: {e}')
 
     # ------------------------------------------------------------------
+    # Timer
+    # ------------------------------------------------------------------
+
+    def _on_timer_change(self, val: str):
+        self._timer_seconds = int(val.replace('s', ''))
+
+    def _start_with_timer(self, action_fn):
+        """Startet einen Countdown und ruft dann action_fn auf."""
+        delay = self._timer_seconds
+        if delay <= 0:
+            action_fn()
+            return
+        self._set_status(f'Timer: {delay}s …')
+        self._countdown(delay, action_fn)
+
+    def _countdown(self, remaining: int, action_fn):
+        if remaining <= 0:
+            action_fn()
+            return
+        self._set_status(f'Aufnahme in {remaining}s …')
+        self.root.after(1000, lambda: self._countdown(remaining - 1, action_fn))
+
+    # ------------------------------------------------------------------
     # Capture-Aktionen
     # ------------------------------------------------------------------
 
@@ -1719,6 +1974,9 @@ class ScreenshotApp:
         if self._capturing:
             return
         self._capturing = True
+        self._start_with_timer(self._do_region_delayed)
+
+    def _do_region_delayed(self):
         self._set_status('Region auswählen …')
         self.root.withdraw()
         self.root.after(150, self._do_region)
@@ -1731,6 +1989,9 @@ class ScreenshotApp:
         if self._capturing:
             return
         self._capturing = True
+        self._start_with_timer(self._do_fullscreen_delayed)
+
+    def _do_fullscreen_delayed(self):
         self._set_status('Vollbild wird aufgenommen …')
         self.root.withdraw()
         self.root.after(300, self._do_fullscreen)
@@ -1746,6 +2007,9 @@ class ScreenshotApp:
         if self._capturing:
             return
         self._capturing = True
+        self._start_with_timer(self._do_window_pick)
+
+    def _do_window_pick(self):
         result = WindowPickerDialog(self.root).show()
         if result is None:
             self._capturing = False
@@ -1766,6 +2030,9 @@ class ScreenshotApp:
         if self._capturing:
             return
         self._capturing = True
+        self._start_with_timer(self._do_scrolling_delayed)
+
+    def _do_scrolling_delayed(self):
         self._set_status('Region für Scrolling auswählen …')
         self.root.withdraw()
         self.root.after(200, self._do_scrolling_pick)
