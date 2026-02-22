@@ -640,6 +640,25 @@ class CaptureEngine:
 # EDITOR  –  Annotation (Datenmodell) + AnnotationEditor
 # ===========================================================================
 
+# ── Gemeinsame UI-Farben ──────────────────────────────────────────────────
+class _Theme:
+    BG_MAIN      = '#F5F7FA'
+    BG_TOOLBAR   = '#FFFFFF'
+    BG_CANVAS    = '#C8CDD5'
+    FG_MAIN      = '#1E293B'
+    FG_MUTED     = '#94A3B8'
+    ACCENT       = '#0078D4'
+    ACCENT_HOV   = '#006ABE'
+    ACCENT_LIGHT = '#EBF3FB'
+    BTN_SEL      = '#0078D4'
+    BTN_NORM     = '#F0F2F5'
+    BTN_HOV      = '#E4E8EF'
+    BTN_FG       = '#334155'
+    DIVIDER      = '#E2E8F0'
+    DANGER       = '#DC2626'
+    DANGER_HOV   = '#B91C1C'
+
+
 @dataclass
 class Annotation:
     kind:        str
@@ -658,7 +677,7 @@ class Annotation:
     number:      int  = 0
 
 
-class AnnotationEditor:
+class AnnotationEditor(_Theme):
     """Annotations-Editor mit horizontaler Toolbar und Filmstreifen."""
 
     TOOLS = [
@@ -676,24 +695,9 @@ class AnnotationEditor:
         ('crop',      '⬒',  'Zuschneiden'),
     ]
 
-    # Helles Design – Farben (verfeinerte Palette)
-    BG_MAIN      = '#F5F7FA'
-    BG_TOOLBAR   = '#FFFFFF'
-    BG_CANVAS    = '#C8CDD5'
+    # Zusätzliche Farben (nur Editor)
     BG_STRIP     = '#F5F7FA'
     BG_CELL      = '#FFFFFF'
-    FG_MAIN      = '#1E293B'
-    FG_MUTED     = '#94A3B8'
-    ACCENT       = '#0078D4'
-    ACCENT_HOV   = '#006ABE'
-    ACCENT_LIGHT = '#EBF3FB'
-    BTN_SEL      = '#0078D4'
-    BTN_NORM     = '#F0F2F5'
-    BTN_HOV      = '#E4E8EF'
-    BTN_FG       = '#334155'
-    DIVIDER      = '#E2E8F0'
-    DANGER       = '#DC2626'
-    DANGER_HOV   = '#B91C1C'
 
     def __init__(self, parent: tk.Tk, image: Image.Image, app,
                  history: HistoryManager | None = None):
@@ -1392,16 +1396,12 @@ class AnnotationEditor:
         cx2, cy2 = min(iw, cx2), min(ih, cy2)
         if cx2 - cx1 < 10 or cy2 - cy1 < 10:
             return
-        # Bild + Annotationen speichern damit Crop rückgängig gemacht werden kann
-        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
-        self.redo_stack.clear()
+        self._push_undo(save_image=True)
         if self.annotations:
             self.image = self._composite_image()
             self.annotations.clear()
         self.image = self.image.crop((cx1, cy1, cx2, cy2))
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set(f'Zugeschnitten auf {cx2-cx1} × {cy2-cy1} px')
+        self._finish_image_op(f'Zugeschnitten auf {cx2-cx1} × {cy2-cy1} px')
 
     def _on_right_click(self, event):
         x, y = self._canvas_coords(event)
@@ -1446,23 +1446,19 @@ class AnnotationEditor:
         menu.tk_popup(event.x_root, event.y_root)
 
     def _delete_annotation(self, idx: int):
-        self.undo_stack.append((deepcopy(self.annotations), None))
-        self.redo_stack.clear()
+        self._push_undo()
         del self.annotations[idx]
         self._step_counter = max(
             (a.number for a in self.annotations if a.kind == 'step'),
             default=0)
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set('Annotation gelöscht')
+        self._finish_image_op('Annotation gelöscht')
 
     # ------------------------------------------------------------------
     # Undo / Commit
     # ------------------------------------------------------------------
 
     def _commit(self, ann: Annotation):
-        self.undo_stack.append((deepcopy(self.annotations), None))
-        self.redo_stack.clear()
+        self._push_undo()
         self.annotations.append(ann)
         self._redraw_canvas()
         self._update_undo_redo_state()
@@ -1705,21 +1701,29 @@ class AnnotationEditor:
     def _clipboard_win(self, img: Image.Image):
         try:
             import win32clipboard
-            output = io.BytesIO()
-            img.convert('RGB').save(output, 'BMP')
-            data = output.getvalue()[14:]
-            output.close()
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-            win32clipboard.CloseClipboard()
-            self._status_var.set('In Zwischenablage kopiert')
         except ImportError:
             messagebox.showinfo(
                 'Zwischenablage',
                 'pywin32 nicht verfügbar.\n'
                 'Bitte speichere das Bild als Datei.',
                 parent=self.win)
+            return
+        output = io.BytesIO()
+        img.convert('RGB').save(output, 'BMP')
+        data = output.getvalue()[14:]
+        output.close()
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+            self._status_var.set('In Zwischenablage kopiert')
+        except Exception as e:
+            self._status_var.set(f'Clipboard-Fehler: {e}')
+        finally:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
 
     def _clipboard_mac(self, img: Image.Image):
         try:
@@ -1741,6 +1745,29 @@ class AnnotationEditor:
     # ------------------------------------------------------------------
     # Bild-Operationen: Resize, Watermark, Shadow, Border
     # ------------------------------------------------------------------
+
+    def _push_undo(self, save_image: bool = False):
+        """Aktuellen Zustand auf den Undo-Stack schieben."""
+        img_copy = self.image.copy() if save_image else None
+        self.undo_stack.append((deepcopy(self.annotations), img_copy))
+        self.redo_stack.clear()
+
+    def _offset_annotations(self, dx: int, dy: int):
+        """Alle Annotations um (dx, dy) Pixel verschieben."""
+        for ann in self.annotations:
+            ann.x1     += dx
+            ann.y1     += dy
+            ann.x2     += dx
+            ann.y2     += dy
+            ann.tail_x += dx
+            ann.tail_y += dy
+            ann.points = [(px + dx, py + dy) for px, py in ann.points]
+
+    def _finish_image_op(self, status_msg: str):
+        """Canvas neu zeichnen und Undo-State aktualisieren."""
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set(status_msg)
 
     def _resize_image(self):
         """Bild-Größe ändern über Dialog."""
@@ -1770,26 +1797,25 @@ class AnnotationEditor:
                 'Format: 800×600 oder 50%', parent=self.win)
             return
 
-        # In Undo-Stack: Bild + Annotations sichern
-        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
-        self.redo_stack.clear()
+        self._push_undo(save_image=True)
 
-        # Skalierungsfaktor für Annotations
         sx, sy = new_w / w, new_h / h
+        scale = (sx + sy) / 2
         self.image = self.image.resize((new_w, new_h), Image.LANCZOS)
 
         for ann in self.annotations:
-            ann.x1     = int(ann.x1 * sx)
-            ann.y1     = int(ann.y1 * sy)
-            ann.x2     = int(ann.x2 * sx)
-            ann.y2     = int(ann.y2 * sy)
-            ann.tail_x = int(ann.tail_x * sx)
-            ann.tail_y = int(ann.tail_y * sy)
-            ann.points = [(int(px * sx), int(py * sy)) for px, py in ann.points]
+            ann.x1        = int(ann.x1 * sx)
+            ann.y1        = int(ann.y1 * sy)
+            ann.x2        = int(ann.x2 * sx)
+            ann.y2        = int(ann.y2 * sy)
+            ann.tail_x    = int(ann.tail_x * sx)
+            ann.tail_y    = int(ann.tail_y * sy)
+            ann.width     = max(1, int(ann.width * scale))
+            ann.font_size = max(8, int(ann.font_size * scale))
+            ann.points    = [(int(px * sx), int(py * sy))
+                             for px, py in ann.points]
 
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set(f'Größe geändert: {new_w} × {new_h}')
+        self._finish_image_op(f'Größe geändert: {new_w} × {new_h}')
 
     def _add_watermark(self):
         """Text-Wasserzeichen auf das Bild legen."""
@@ -1801,19 +1827,16 @@ class AnnotationEditor:
         if not text:
             return
 
-        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
-        self.redo_stack.clear()
+        self._push_undo(save_image=True)
 
-        # Wasserzeichen als halbtransparentes Overlay auf das Basisbild brennen
         overlay = Image.new('RGBA', self.image.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         font_size = max(14, self.image.width // 30)
         font = _get_truetype_font(font_size)
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x = self.image.width - tw - 16
-        y = self.image.height - th - 16
-        # Halbtransparenter Hintergrund
+        x = max(4, self.image.width - tw - 16)
+        y = max(4, self.image.height - th - 16)
         draw.rectangle([(x - 8, y - 4), (x + tw + 8, y + th + 4)],
                         fill=(0, 0, 0, 80))
         draw.text((x, y), text, fill=(255, 255, 255, 140), font=font)
@@ -1821,53 +1844,28 @@ class AnnotationEditor:
 
         base = self.image.convert('RGBA')
         self.image = Image.alpha_composite(base, overlay).convert('RGB')
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set('Wasserzeichen hinzugefügt')
+        self._finish_image_op('Wasserzeichen hinzugefügt')
 
     def _add_shadow(self):
         """Drop-Shadow um das gesamte Bild hinzufügen."""
-        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
-        self.redo_stack.clear()
+        self._push_undo(save_image=True)
 
-        shadow_size  = 20
-        offset       = 6
-        bg_color     = (240, 240, 240)
-        shadow_color = (0, 0, 0)
-
+        pad, off = 20, 6
         w, h = self.image.size
-        new_w = w + shadow_size * 2
-        new_h = h + shadow_size * 2
+        new_w, new_h = w + pad * 2, h + pad * 2
 
-        # Schattenmaske
         shadow = Image.new('L', (new_w, new_h), 0)
-        shadow.paste(180, (shadow_size + offset, shadow_size + offset,
-                           shadow_size + offset + w, shadow_size + offset + h))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=shadow_size // 2))
+        shadow.paste(180, (pad + off, pad + off, pad + off + w, pad + off + h))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=pad // 2))
 
-        # Neues Bild zusammensetzen
-        result = Image.new('RGB', (new_w, new_h), bg_color)
-        # Schatten anwenden
-        shadow_layer = Image.new('RGB', (new_w, new_h), shadow_color)
-        result = Image.composite(shadow_layer, result, shadow)
-        # Originalbild einfügen
-        result.paste(self.image, (shadow_size, shadow_size))
+        result = Image.new('RGB', (new_w, new_h), (240, 240, 240))
+        result = Image.composite(
+            Image.new('RGB', (new_w, new_h), (0, 0, 0)), result, shadow)
+        result.paste(self.image, (pad, pad))
 
-        # Annotation-Koordinaten verschieben
-        for ann in self.annotations:
-            ann.x1     += shadow_size
-            ann.y1     += shadow_size
-            ann.x2     += shadow_size
-            ann.y2     += shadow_size
-            ann.tail_x += shadow_size
-            ann.tail_y += shadow_size
-            ann.points = [(px + shadow_size, py + shadow_size)
-                          for px, py in ann.points]
-
+        self._offset_annotations(pad, pad)
         self.image = result
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set('Schatten hinzugefügt')
+        self._finish_image_op('Schatten hinzugefügt')
 
     def _add_border(self):
         """Farbigen Rahmen um das Bild hinzufügen."""
@@ -1892,27 +1890,11 @@ class AnnotationEditor:
             return
         hex_color = color[1]
 
-        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
-        self.redo_stack.clear()
-
-        bordered = ImageOps.expand(self.image, border=border_px,
-                                    fill=hex_color)
-
-        # Annotation-Koordinaten verschieben
-        for ann in self.annotations:
-            ann.x1     += border_px
-            ann.y1     += border_px
-            ann.x2     += border_px
-            ann.y2     += border_px
-            ann.tail_x += border_px
-            ann.tail_y += border_px
-            ann.points = [(px + border_px, py + border_px)
-                          for px, py in ann.points]
-
-        self.image = bordered
-        self._redraw_canvas()
-        self._update_undo_redo_state()
-        self._status_var.set(f'Rahmen ({border_px}px) hinzugefügt')
+        self._push_undo(save_image=True)
+        self.image = ImageOps.expand(self.image, border=border_px,
+                                      fill=hex_color)
+        self._offset_annotations(border_px, border_px)
+        self._finish_image_op(f'Rahmen ({border_px}px) hinzugefügt')
 
     # ------------------------------------------------------------------
     # Fenster schließen
@@ -2014,18 +1996,13 @@ class _ScrollingRegionOverlay:
 # HAUPTANWENDUNG  –  ScreenshotApp
 # ===========================================================================
 
-class ScreenshotApp:
+class ScreenshotApp(_Theme):
     """Haupt-Controller: kleines Toolbar-Fenster + globale Hotkeys."""
 
-    # Farben (abgestimmt auf Editor-Design)
-    BG       = '#F5F7FA'
-    BG_TOP   = '#FFFFFF'
-    ACCENT   = '#0078D4'
-    ACCENT_H = '#006ABE'
-    BTN_NORM = '#F0F2F5'
-    BTN_FG   = '#334155'
-    FG_MUTED = '#94A3B8'
-    DIVIDER  = '#E2E8F0'
+    # Aliases für Rückwärtskompatibilität
+    BG       = _Theme.BG_MAIN
+    BG_TOP   = _Theme.BG_TOOLBAR
+    ACCENT_H = _Theme.ACCENT_HOV
 
     def __init__(self):
         self.root = tk.Tk()
