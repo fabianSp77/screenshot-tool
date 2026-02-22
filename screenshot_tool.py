@@ -34,7 +34,7 @@ from tkinter import filedialog, simpledialog, colorchooser, messagebox
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk, ImageOps
 
 # ── Plattform-Erkennung ─────────────────────────────────────────────────────
 IS_WINDOWS = sys.platform == 'win32'
@@ -837,6 +837,16 @@ class AnnotationEditor:
         em.add_command(label=f'Rückgängig        {mod}+Z', command=self._undo)
         em.add_command(label=f'Wiederherstellen  {mod}+Y', command=self._redo)
         mb.add_cascade(label='Bearbeiten', menu=em)
+
+        im = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
+                     activebackground=self.ACCENT, activeforeground='white')
+        im.add_command(label='Größe ändern …',      command=self._resize_image)
+        im.add_command(label='Wasserzeichen …',      command=self._add_watermark)
+        im.add_separator()
+        im.add_command(label='Schatten hinzufügen',  command=self._add_shadow)
+        im.add_command(label='Rahmen hinzufügen …',  command=self._add_border)
+        mb.add_cascade(label='Bild', menu=im)
+
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
     def _build_toolbar(self):
@@ -1727,6 +1737,186 @@ class AnnotationEditor:
             self._status_var.set('In Zwischenablage kopiert')
         except Exception as e:
             self._status_var.set(f'Clipboard-Fehler: {e}')
+
+    # ------------------------------------------------------------------
+    # Bild-Operationen: Resize, Watermark, Shadow, Border
+    # ------------------------------------------------------------------
+
+    def _resize_image(self):
+        """Bild-Größe ändern über Dialog."""
+        w, h = self.image.size
+        result = simpledialog.askstring(
+            'Größe ändern',
+            f'Aktuelle Größe: {w} × {h}\n\n'
+            'Neue Größe eingeben (Breite×Höhe oder Prozent):\n'
+            'Beispiele: 800×600, 50%',
+            parent=self.win)
+        if not result:
+            return
+        result = result.strip()
+        try:
+            if '%' in result:
+                pct = float(result.replace('%', '').strip()) / 100
+                new_w, new_h = max(1, int(w * pct)), max(1, int(h * pct))
+            elif '×' in result or 'x' in result.lower():
+                parts = result.replace('×', 'x').lower().split('x')
+                new_w, new_h = max(1, int(parts[0].strip())), max(1, int(parts[1].strip()))
+            else:
+                messagebox.showwarning('Ungültige Eingabe',
+                    'Format: 800×600 oder 50%', parent=self.win)
+                return
+        except (ValueError, IndexError):
+            messagebox.showwarning('Ungültige Eingabe',
+                'Format: 800×600 oder 50%', parent=self.win)
+            return
+
+        # In Undo-Stack: Bild + Annotations sichern
+        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
+        self.redo_stack.clear()
+
+        # Skalierungsfaktor für Annotations
+        sx, sy = new_w / w, new_h / h
+        self.image = self.image.resize((new_w, new_h), Image.LANCZOS)
+
+        for ann in self.annotations:
+            ann.x1     = int(ann.x1 * sx)
+            ann.y1     = int(ann.y1 * sy)
+            ann.x2     = int(ann.x2 * sx)
+            ann.y2     = int(ann.y2 * sy)
+            ann.tail_x = int(ann.tail_x * sx)
+            ann.tail_y = int(ann.tail_y * sy)
+            ann.points = [(int(px * sx), int(py * sy)) for px, py in ann.points]
+
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set(f'Größe geändert: {new_w} × {new_h}')
+
+    def _add_watermark(self):
+        """Text-Wasserzeichen auf das Bild legen."""
+        text = simpledialog.askstring(
+            'Wasserzeichen',
+            'Wasserzeichen-Text eingeben:',
+            initialvalue='© Mein Wasserzeichen',
+            parent=self.win)
+        if not text:
+            return
+
+        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
+        self.redo_stack.clear()
+
+        # Wasserzeichen als halbtransparentes Overlay auf das Basisbild brennen
+        overlay = Image.new('RGBA', self.image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        font_size = max(14, self.image.width // 30)
+        font = _get_truetype_font(font_size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = self.image.width - tw - 16
+        y = self.image.height - th - 16
+        # Halbtransparenter Hintergrund
+        draw.rectangle([(x - 8, y - 4), (x + tw + 8, y + th + 4)],
+                        fill=(0, 0, 0, 80))
+        draw.text((x, y), text, fill=(255, 255, 255, 140), font=font)
+        del draw
+
+        base = self.image.convert('RGBA')
+        self.image = Image.alpha_composite(base, overlay).convert('RGB')
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set('Wasserzeichen hinzugefügt')
+
+    def _add_shadow(self):
+        """Drop-Shadow um das gesamte Bild hinzufügen."""
+        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
+        self.redo_stack.clear()
+
+        shadow_size  = 20
+        offset       = 6
+        bg_color     = (240, 240, 240)
+        shadow_color = (0, 0, 0)
+
+        w, h = self.image.size
+        new_w = w + shadow_size * 2
+        new_h = h + shadow_size * 2
+
+        # Schattenmaske
+        shadow = Image.new('L', (new_w, new_h), 0)
+        shadow.paste(180, (shadow_size + offset, shadow_size + offset,
+                           shadow_size + offset + w, shadow_size + offset + h))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=shadow_size // 2))
+
+        # Neues Bild zusammensetzen
+        result = Image.new('RGB', (new_w, new_h), bg_color)
+        # Schatten anwenden
+        shadow_layer = Image.new('RGB', (new_w, new_h), shadow_color)
+        result = Image.composite(shadow_layer, result, shadow)
+        # Originalbild einfügen
+        result.paste(self.image, (shadow_size, shadow_size))
+
+        # Annotation-Koordinaten verschieben
+        for ann in self.annotations:
+            ann.x1     += shadow_size
+            ann.y1     += shadow_size
+            ann.x2     += shadow_size
+            ann.y2     += shadow_size
+            ann.tail_x += shadow_size
+            ann.tail_y += shadow_size
+            ann.points = [(px + shadow_size, py + shadow_size)
+                          for px, py in ann.points]
+
+        self.image = result
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set('Schatten hinzugefügt')
+
+    def _add_border(self):
+        """Farbigen Rahmen um das Bild hinzufügen."""
+        result = simpledialog.askstring(
+            'Rahmen hinzufügen',
+            'Rahmenbreite in Pixel eingeben:',
+            initialvalue='10',
+            parent=self.win)
+        if not result:
+            return
+        try:
+            border_px = max(1, int(result.strip()))
+        except ValueError:
+            messagebox.showwarning('Ungültige Eingabe',
+                'Bitte eine Zahl eingeben.', parent=self.win)
+            return
+
+        color = colorchooser.askcolor(
+            title='Rahmenfarbe wählen', color='#1E293B',
+            parent=self.win)
+        if not color[1]:
+            return
+        hex_color = color[1]
+
+        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
+        self.redo_stack.clear()
+
+        bordered = ImageOps.expand(self.image, border=border_px,
+                                    fill=hex_color)
+
+        # Annotation-Koordinaten verschieben
+        for ann in self.annotations:
+            ann.x1     += border_px
+            ann.y1     += border_px
+            ann.x2     += border_px
+            ann.y2     += border_px
+            ann.tail_x += border_px
+            ann.tail_y += border_px
+            ann.points = [(px + border_px, py + border_px)
+                          for px, py in ann.points]
+
+        self.image = bordered
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._status_var.set(f'Rahmen ({border_px}px) hinzugefügt')
+
+    # ------------------------------------------------------------------
+    # Fenster schließen
+    # ------------------------------------------------------------------
 
     def _on_close(self):
         self.win.destroy()
