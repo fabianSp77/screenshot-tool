@@ -31,6 +31,7 @@ import tempfile
 import time
 import tkinter as tk
 from tkinter import filedialog, simpledialog, colorchooser, messagebox
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
@@ -483,52 +484,55 @@ class CaptureEngine:
         raise RuntimeError('Fenster-Capture wird auf dieser Plattform nicht unterstützt')
 
     def _capture_window_win(self, hwnd: int) -> Image.Image:
+        import win32gui, win32ui
+        from ctypes import windll
+
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.2)
+
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        w = right - left
+        h = bottom - top
+        if w <= 0 or h <= 0:
+            raise ValueError('Fenster hat ungültige Größe')
+
+        hwnd_dc = save_dc = mfc_dc = save_bmp = None
         try:
-            import win32gui, win32ui
-            from ctypes import windll
-
-            win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.2)
-
-            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-            w = right - left
-            h = bottom - top
-            if w <= 0 or h <= 0:
-                raise ValueError('Fenster hat ungültige Größe')
-
-            hwnd_dc    = win32gui.GetWindowDC(hwnd)
-            mfc_dc     = win32ui.CreateDCFromHandle(hwnd_dc)
-            save_dc    = mfc_dc.CreateCompatibleDC()
-            save_bmp   = win32ui.CreateBitmap()
+            hwnd_dc  = win32gui.GetWindowDC(hwnd)
+            mfc_dc   = win32ui.CreateDCFromHandle(hwnd_dc)
+            save_dc  = mfc_dc.CreateCompatibleDC()
+            save_bmp = win32ui.CreateBitmap()
             save_bmp.CreateCompatibleBitmap(mfc_dc, w, h)
             save_dc.SelectObject(save_bmp)
             windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
 
             bmpinfo = save_bmp.GetInfo()
             bmpstr  = save_bmp.GetBitmapBits(True)
-            img = Image.frombuffer(
+            return Image.frombuffer(
                 'RGB', (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
                 bmpstr, 'raw', 'BGRX', 0, 1)
-
-            win32gui.DeleteObject(save_bmp.GetHandle())
-            save_dc.DeleteDC()
-            mfc_dc.DeleteDC()
-            win32gui.ReleaseDC(hwnd, hwnd_dc)
-            return img
-
         except Exception:
-            try:
-                import win32gui
-                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-            except Exception:
-                raise
+            # Fallback: mss Region-Capture
             import mss
             with mss.mss() as sct:
                 mon = {'left': left, 'top': top,
-                       'width': right - left, 'height': bottom - top}
+                       'width': w, 'height': h}
                 raw = sct.grab(mon)
                 return Image.frombytes('RGB', raw.size,
                                        raw.bgra, 'raw', 'BGRX')
+        finally:
+            if save_bmp:
+                try: win32gui.DeleteObject(save_bmp.GetHandle())
+                except Exception: pass
+            if save_dc:
+                try: save_dc.DeleteDC()
+                except Exception: pass
+            if mfc_dc:
+                try: mfc_dc.DeleteDC()
+                except Exception: pass
+            if hwnd_dc:
+                try: win32gui.ReleaseDC(hwnd, hwnd_dc)
+                except Exception: pass
 
     def _capture_window_mac(self, wid: int) -> Image.Image:
         import Quartz
@@ -638,20 +642,20 @@ class CaptureEngine:
 
 @dataclass
 class Annotation:
-    kind:      str
-    x1:        int = 0
-    y1:        int = 0
-    x2:        int = 0
-    y2:        int = 0
-    color:     str = '#FF0000'
-    width:     int = 3
-    text:      str = ''
-    font_size: int = 16
-    tail_x:      int = 0
-    tail_y:      int = 0
+    kind:        str
+    x1:          int  = 0
+    y1:          int  = 0
+    x2:          int  = 0
+    y2:          int  = 0
+    color:       str  = '#FF0000'
+    width:       int  = 3
+    text:        str  = ''
+    font_size:   int  = 16
+    tail_x:      int  = 0
+    tail_y:      int  = 0
     points:      list = field(default_factory=list)
-    blur_radius: int = 15
-    number:      int = 0
+    blur_radius: int  = 15
+    number:      int  = 0
 
 
 class AnnotationEditor:
@@ -699,8 +703,9 @@ class AnnotationEditor:
         self.history = history or HistoryManager()
 
         self.annotations: list[Annotation] = []
-        self.undo_stack:  list[list]        = []
-        self.redo_stack:  list[list]        = []
+        # Undo/Redo: list of (annotations_copy, image_or_None)
+        self.undo_stack: list[tuple[list[Annotation], Image.Image | None]] = []
+        self.redo_stack: list[tuple[list[Annotation], Image.Image | None]] = []
 
         self.active_tool = 'arrow'
         self.tool_color  = '#FF0000'
@@ -708,9 +713,7 @@ class AnnotationEditor:
         self.font_size   = 16
 
         self._drawing    = False
-        self._drag_item  = None
         self._drag_start = (0, 0)
-        self._tmp_photo  = None
         self._freehand_points: list[tuple[int, int]] = []
         self._step_counter = 0
         self.blur_radius = 15
@@ -796,6 +799,22 @@ class AnnotationEditor:
         btn.bind('<Enter>', on_enter)
         btn.bind('<Leave>', on_leave)
 
+    def _add_tooltip(self, widget: tk.Widget, text: str):
+        tip_win = [None]
+        def show(e):
+            tw = tk.Toplevel(widget)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f'+{e.x_root + 12}+{e.y_root + 20}')
+            tk.Label(tw, text=text, bg='#1E293B', fg='white',
+                     font=(FONT_FAMILY, 8), padx=6, pady=2).pack()
+            tip_win[0] = tw
+        def hide(e):
+            if tip_win[0]:
+                tip_win[0].destroy()
+                tip_win[0] = None
+        widget.bind('<Enter>', show, add='+')
+        widget.bind('<Leave>', hide, add='+')
+
     # ------------------------------------------------------------------
     # GUI-Aufbau
     # ------------------------------------------------------------------
@@ -815,7 +834,8 @@ class AnnotationEditor:
 
         em = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
                      activebackground=self.ACCENT, activeforeground='white')
-        em.add_command(label=f'Rückgängig  {mod}+Z', command=self._undo)
+        em.add_command(label=f'Rückgängig        {mod}+Z', command=self._undo)
+        em.add_command(label=f'Wiederherstellen  {mod}+Y', command=self._redo)
         mb.add_cascade(label='Bearbeiten', menu=em)
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
@@ -828,19 +848,20 @@ class AnnotationEditor:
         inner = tk.Frame(self.toolbar, bg=self.BG_TOOLBAR)
         inner.pack(fill='x', padx=4, pady=3)
 
-        # Werkzeug-Buttons
+        # Werkzeug-Buttons (nur Symbol, Tooltip zeigt Name)
         self._tool_buttons: dict[str, tk.Button] = {}
         for tool_id, symbol, label in self.TOOLS:
             btn = tk.Button(
-                inner, text=f'{symbol}  {label}',
-                font=(FONT_FAMILY, 9),
+                inner, text=symbol,
+                font=(FONT_FAMILY, 12),
                 bg=self.BTN_NORM, fg=self.BTN_FG,
                 activebackground=self.ACCENT, activeforeground='white',
-                relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
+                relief='flat', padx=6, pady=3, bd=0, cursor='hand2',
                 command=lambda t=tool_id: self._select_tool(t))
             btn.pack(side='left', padx=1)
             self._tool_buttons[tool_id] = btn
             self._add_tool_hover(btn, tool_id)
+            self._add_tooltip(btn, label)
 
         tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', padx=8, pady=2)
@@ -971,8 +992,11 @@ class AnnotationEditor:
         self.canvas.bind('<ButtonPress-1>',   self._on_mouse_down)
         self.canvas.bind('<B1-Motion>',        self._on_mouse_drag)
         self.canvas.bind('<ButtonRelease-1>', self._on_mouse_up)
-        self.canvas.bind('<Button-2>', self._on_right_click)
-        self.canvas.bind('<Button-3>', self._on_right_click)
+        # macOS: Button-2 = Rechtsklick; Windows/Linux: Button-3
+        if IS_MACOS:
+            self.canvas.bind('<Button-2>', self._on_right_click)
+        else:
+            self.canvas.bind('<Button-3>', self._on_right_click)
 
     def _build_filmstrip(self):
         STRIP_H = 132
@@ -1101,6 +1125,7 @@ class AnnotationEditor:
         self._step_counter = 0
         self.image = img
         self._redraw_canvas()
+        self._refresh_filmstrip()
         self._update_undo_redo_state()
         self._status_var.set('Bild aus Verlauf geladen')
 
@@ -1130,8 +1155,12 @@ class AnnotationEditor:
         self.win.bind(f'<{mod}-s>', lambda e: self.save_to_file())
         self.win.bind(f'<{mod}-c>', lambda e: self.copy_to_clipboard())
         for i, (tool_id, _, _) in enumerate(self.TOOLS):
-            self.win.bind(str(i + 1),
-                          lambda e, t=tool_id: self._select_tool(t))
+            if i < 9:
+                self.win.bind(str(i + 1),
+                              lambda e, t=tool_id: self._select_tool(t))
+            elif i == 9:
+                self.win.bind('0',
+                              lambda e, t=tool_id: self._select_tool(t))
 
     # ------------------------------------------------------------------
     # Tool-Steuerung
@@ -1178,7 +1207,6 @@ class AnnotationEditor:
         self._drawing    = True
         x, y             = self._canvas_coords(event)
         self._drag_start = (x, y)
-        self._drag_item  = None
         if self.active_tool == 'text':
             self._handle_text(x, y)
             self._drawing = False
@@ -1325,10 +1353,13 @@ class AnnotationEditor:
     def _handle_callout_tip(self, event):
         self.canvas.bind('<ButtonPress-1>', self._on_mouse_down)
         x, y = self._canvas_coords(event)
+        # Bubble-Größe dynamisch an Text anpassen
+        bubble_w = max(120, int(len(self._callout_text) * self.font_size * 0.65) + 16)
+        bubble_h = max(40, self.font_size + 16)
         self._commit(Annotation(
             kind='callout',
             x1=self._callout_x, y1=self._callout_y,
-            x2=self._callout_x + 120, y2=self._callout_y + 40,
+            x2=self._callout_x + bubble_w, y2=self._callout_y + bubble_h,
             color=self.tool_color, width=self.tool_width,
             font_size=self.font_size, text=self._callout_text,
             tail_x=x, tail_y=y))
@@ -1351,8 +1382,8 @@ class AnnotationEditor:
         cx2, cy2 = min(iw, cx2), min(ih, cy2)
         if cx2 - cx1 < 10 or cy2 - cy1 < 10:
             return
-        # Alle Annotationen in das aktuelle Bild einbacken, dann zuschneiden
-        self.undo_stack.append([a for a in self.annotations])
+        # Bild + Annotationen speichern damit Crop rückgängig gemacht werden kann
+        self.undo_stack.append((deepcopy(self.annotations), self.image.copy()))
         self.redo_stack.clear()
         if self.annotations:
             self.image = self._composite_image()
@@ -1405,9 +1436,12 @@ class AnnotationEditor:
         menu.tk_popup(event.x_root, event.y_root)
 
     def _delete_annotation(self, idx: int):
-        self.undo_stack.append([a for a in self.annotations])
+        self.undo_stack.append((deepcopy(self.annotations), None))
         self.redo_stack.clear()
         del self.annotations[idx]
+        self._step_counter = max(
+            (a.number for a in self.annotations if a.kind == 'step'),
+            default=0)
         self._redraw_canvas()
         self._update_undo_redo_state()
         self._status_var.set('Annotation gelöscht')
@@ -1417,25 +1451,42 @@ class AnnotationEditor:
     # ------------------------------------------------------------------
 
     def _commit(self, ann: Annotation):
-        self.undo_stack.append([a for a in self.annotations])
+        self.undo_stack.append((deepcopy(self.annotations), None))
         self.redo_stack.clear()
         self.annotations.append(ann)
         self._redraw_canvas()
         self._update_undo_redo_state()
 
     def _undo(self):
-        if self.undo_stack:
-            self.redo_stack.append([a for a in self.annotations])
-            self.annotations = self.undo_stack.pop()
-            self._redraw_canvas()
-            self._update_undo_redo_state()
+        if not self.undo_stack:
+            return
+        prev_anns, prev_img = self.undo_stack.pop()
+        # Redo muss das aktuelle Bild speichern falls es sich ändert
+        redo_img = self.image.copy() if prev_img is not None else None
+        self.redo_stack.append((deepcopy(self.annotations), redo_img))
+        self.annotations = prev_anns
+        if prev_img is not None:
+            self.image = prev_img
+        self._step_counter = max(
+            (a.number for a in self.annotations if a.kind == 'step'),
+            default=0)
+        self._redraw_canvas()
+        self._update_undo_redo_state()
 
     def _redo(self):
-        if self.redo_stack:
-            self.undo_stack.append([a for a in self.annotations])
-            self.annotations = self.redo_stack.pop()
-            self._redraw_canvas()
-            self._update_undo_redo_state()
+        if not self.redo_stack:
+            return
+        next_anns, next_img = self.redo_stack.pop()
+        undo_img = self.image.copy() if next_img is not None else None
+        self.undo_stack.append((deepcopy(self.annotations), undo_img))
+        self.annotations = next_anns
+        if next_img is not None:
+            self.image = next_img
+        self._step_counter = max(
+            (a.number for a in self.annotations if a.kind == 'step'),
+            default=0)
+        self._redraw_canvas()
+        self._update_undo_redo_state()
 
     def _update_undo_redo_state(self):
         if hasattr(self, '_undo_btn'):
@@ -1665,9 +1716,10 @@ class AnnotationEditor:
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
                 tmp_path = f.name
                 img.save(f, 'PNG')
+            safe_path = tmp_path.replace('\\', '\\\\').replace('"', '\\"')
             script = (
                 'set the clipboard to '
-                f'(read (POSIX file "{tmp_path}") as «class PNGf»)'
+                f'(read (POSIX file "{safe_path}") as «class PNGf»)'
             )
             subprocess.run(['osascript', '-e', script],
                            check=True, capture_output=True)
@@ -1805,8 +1857,8 @@ class ScreenshotApp:
 
     def _build_ui(self):
         self.root.configure(bg=self.BG)
-        self.root.geometry('720x72')
-        self.root.minsize(680, 72)
+        self.root.geometry('820x72')
+        self.root.minsize(780, 72)
         self.root.resizable(True, False)
 
         bar = tk.Frame(self.root, bg=self.BG_TOP,
