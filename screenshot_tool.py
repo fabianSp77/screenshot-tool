@@ -165,12 +165,17 @@ class HistoryManager:
         self._load_index()
 
     # ------------------------------------------------------------------
-    def add(self, image: Image.Image) -> dict:
+    def add(self, image: Image.Image,
+            save_path: str | None = None) -> dict:
         now = datetime.now()
         entry_id = now.strftime('%Y%m%d_%H%M%S_%f')
 
         img_filename = f'img_{entry_id}.png'
         image.save(os.path.join(self.history_dir, img_filename))
+
+        # Original separat speichern (unveränderbare Kopie)
+        orig_filename = f'orig_{entry_id}.png'
+        image.save(os.path.join(self.history_dir, orig_filename))
 
         thumb = image.copy()
         thumb.thumbnail((THUMB_W, THUMB_H), Image.LANCZOS)
@@ -180,9 +185,12 @@ class HistoryManager:
         entry = {
             'id':                entry_id,
             'filename':          img_filename,
+            'orig_filename':     orig_filename,
             'thumb_filename':    thumb_filename,
             'timestamp':         now.isoformat(),
             'timestamp_display': now.strftime('%d.%m.%Y %H:%M:%S'),
+            'save_path':         save_path,
+            'edited':            False,
         }
         self.entries.insert(0, entry)
 
@@ -201,6 +209,26 @@ class HistoryManager:
         thumb = image.copy()
         thumb.thumbnail((THUMB_W, THUMB_H), Image.LANCZOS)
         thumb.save(os.path.join(self.history_dir, entry['thumb_filename']))
+        entry['edited'] = True
+        self._save_index()
+
+    def load_original(self, entry_id: str) -> Image.Image | None:
+        """Lädt das unbearbeitete Original-Bild."""
+        entry = self._find(entry_id)
+        if not entry:
+            return None
+        orig = entry.get('orig_filename')
+        if not orig:
+            return None
+        path = os.path.join(self.history_dir, orig)
+        return Image.open(path).copy() if os.path.exists(path) else None
+
+    def has_original(self, entry_id: str) -> bool:
+        entry = self._find(entry_id)
+        if not entry:
+            return False
+        orig = entry.get('orig_filename', '')
+        return os.path.exists(os.path.join(self.history_dir, orig))
 
     def remove(self, entry_id: str):
         entry = self._find(entry_id)
@@ -226,6 +254,25 @@ class HistoryManager:
     def get_entries(self) -> list[dict]:
         return list(self.entries)
 
+    def get_entry(self, entry_id: str) -> dict | None:
+        """Gibt den Verlauf-Eintrag mit der ID zurück (oder None)."""
+        return self._find(entry_id)
+
+    def update_save_path(self, entry_id: str, path: str):
+        """Aktualisiert den Speicherpfad eines Verlauf-Eintrags."""
+        entry = self._find(entry_id)
+        if entry:
+            entry['save_path'] = path
+            self._save_index()
+
+    def get_file_path(self, entry_id: str) -> str | None:
+        """Gibt den vollständigen Dateipfad des Verlauf-Bildes zurück."""
+        entry = self._find(entry_id)
+        if not entry:
+            return None
+        path = os.path.join(self.history_dir, entry['filename'])
+        return path if os.path.exists(path) else None
+
     # ------------------------------------------------------------------
     def _find(self, entry_id: str) -> dict | None:
         for e in self.entries:
@@ -234,7 +281,7 @@ class HistoryManager:
         return None
 
     def _remove_entry(self, entry: dict):
-        for key in ('filename', 'thumb_filename'):
+        for key in ('filename', 'thumb_filename', 'orig_filename'):
             path = os.path.join(self.history_dir, entry.get(key, ''))
             if os.path.exists(path):
                 try:
@@ -258,10 +305,13 @@ class HistoryManager:
             self.entries = []
 
     def _save_index(self):
+        """Atomar: in Temp-Datei schreiben, dann umbenennen."""
         try:
-            with open(self.index_path, 'w', encoding='utf-8') as f:
+            tmp = self.index_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump({'entries': self.entries}, f,
                           ensure_ascii=False, indent=2)
+            os.replace(tmp, self.index_path)  # atomare Operation
         except Exception:
             pass
 
@@ -685,6 +735,7 @@ class AnnotationEditor(_Theme):
     """Annotations-Editor mit horizontaler Toolbar und Filmstreifen."""
 
     TOOLS = [
+        ('select',    '⊹',  'Auswahl / Verschieben'),
         ('arrow',     '→',  'Pfeil'),
         ('line',      '╱',  'Linie'),
         ('rect',      '□',  'Rechteck'),
@@ -730,6 +781,11 @@ class AnnotationEditor(_Theme):
         self._freehand_points: list[tuple[int, int]] = []
         self._step_counter = 0
         self.blur_radius = 15
+
+        # Select / Move state
+        self._selected_idx: int | None = None
+        self._move_dragging = False
+        self._move_last: tuple[int, int] = (0, 0)
 
         self._thumb_photos: list[ImageTk.PhotoImage] = []
         self._current_entry_id: str | None = None
@@ -928,19 +984,6 @@ class AnnotationEditor(_Theme):
     # Hover-Hilfsmethoden
     # ------------------------------------------------------------------
 
-    def _add_hover(self, widget: tk.Widget,
-                   hover_bg: str, hover_fg: str,
-                   normal_bg: str, normal_fg: str):
-        widget.bind('<Enter>',
-                    lambda e: widget.config(bg=hover_bg, fg=hover_fg))
-        widget.bind('<Leave>',
-                    lambda e: widget.config(bg=normal_bg, fg=normal_fg))
-
-    def _add_tool_hover(self, btn, tool_id: str):
-        """Hover für ttk Tool-Buttons (nicht mehr benötigt, ttk macht
-        Hover über style.map automatisch)."""
-        pass
-
     def _add_tooltip(self, widget: tk.Widget, text: str):
         tip_win = [None]
         delay_id = [None]
@@ -987,7 +1030,10 @@ class AnnotationEditor(_Theme):
         em = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
                      activebackground=self.ACCENT, activeforeground='white')
         em.add_command(label=f'Rückgängig        {mod}+Z', command=self._undo)
-        em.add_command(label=f'Wiederherstellen  {mod}+Y', command=self._redo)
+        em.add_command(label=f'Wiederholen       {mod}+Y', command=self._redo)
+        em.add_separator()
+        em.add_command(label=f'Original laden    {mod}+Shift+O',
+                       command=self._restore_original)
         mb.add_cascade(label='Bearbeiten', menu=em)
 
         im = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
@@ -1124,7 +1170,7 @@ class AnnotationEditor(_Theme):
             self.canvas.bind('<Button-3>', self._on_right_click)
 
     def _build_filmstrip(self):
-        STRIP_H = 132
+        STRIP_H = 148
         tk.Frame(self.win, bg=self.DIVIDER, height=1).pack(
             side='bottom', fill='x')
 
@@ -1135,9 +1181,14 @@ class AnnotationEditor(_Theme):
         hdr = tk.Frame(strip_frame, bg=self.BG_STRIP)
         hdr.pack(side='left', fill='y', padx=(12, 4))
         tk.Label(hdr, text='🗂', bg=self.BG_STRIP, fg=self.ACCENT,
-                 font=(FONT_FAMILY, 18)).pack(pady=(14, 0))
+                 font=(FONT_FAMILY, 18)).pack(pady=(10, 0))
         tk.Label(hdr, text='VERLAUF', bg=self.BG_STRIP, fg=self.FG_MUTED,
                  font=(FONT_FAMILY, 7, 'bold')).pack()
+        # Anzahl-Badge
+        self._strip_count_lbl = tk.Label(
+            hdr, text='', bg=self.BG_STRIP, fg=self.ACCENT,
+            font=(FONT_FAMILY, 8, 'bold'))
+        self._strip_count_lbl.pack(pady=(2, 0))
 
         tk.Frame(strip_frame, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', pady=12, padx=(4, 0))
@@ -1162,6 +1213,10 @@ class AnnotationEditor(_Theme):
             lambda e: self._strip_canvas.config(
                 scrollregion=self._strip_canvas.bbox('all')))
 
+        # Filmstrip-Paginierung
+        self._strip_page = 0
+        self._strip_page_size = 30
+
         self._refresh_filmstrip()
 
     def _refresh_filmstrip(self):
@@ -1170,71 +1225,207 @@ class AnnotationEditor(_Theme):
         self._thumb_photos.clear()
 
         entries = self.history.get_entries()
+        total = len(entries)
+
+        # Anzahl-Badge aktualisieren
+        if hasattr(self, '_strip_count_lbl'):
+            self._strip_count_lbl.config(text=f'{total}' if total else '')
+
         if not entries:
             tk.Label(self._strip_inner,
                      text='Noch keine Screenshots vorhanden',
                      bg=self.BG_STRIP, fg=self.FG_MUTED,
                      font=(FONT_FAMILY, 9)).pack(padx=20, pady=20)
             return
-        for entry in entries:
+
+        # Paginierung: nur aktuelle Seite anzeigen
+        page = getattr(self, '_strip_page', 0)
+        page_size = getattr(self, '_strip_page_size', 30)
+        start = page * page_size
+        end = min(start + page_size, total)
+        visible = entries[start:end]
+
+        # Navigations-Button links (vorherige Seite = neuere Bilder)
+        if start > 0:
+            nav_left = tk.Button(
+                self._strip_inner, text='◀', font=(FONT_FAMILY, 14),
+                bg=self.BG_STRIP, fg=self.ACCENT, relief='flat',
+                cursor='hand2', bd=0,
+                command=lambda: self._filmstrip_page(-1))
+            nav_left.pack(side='left', padx=2, pady=6)
+
+        for entry in visible:
             self._add_thumb_widget(entry)
+
+        # Navigations-Button rechts (nächste Seite = ältere Bilder)
+        if end < total:
+            nav_right = tk.Button(
+                self._strip_inner, text=f'▶ +{total - end}',
+                font=(FONT_FAMILY, 10),
+                bg=self.BG_STRIP, fg=self.ACCENT, relief='flat',
+                cursor='hand2', bd=0,
+                command=lambda: self._filmstrip_page(1))
+            nav_right.pack(side='left', padx=2, pady=6)
+
+    def _filmstrip_page(self, direction: int):
+        """Blättert im Filmstrip: direction +1 = ältere, -1 = neuere."""
+        self._strip_page = max(0, self._strip_page + direction)
+        self._refresh_filmstrip()
 
     def _add_thumb_widget(self, entry: dict):
         thumb_img = self.history.load_thumbnail(entry['id'])
         is_active = (entry['id'] == self._current_entry_id)
+        is_edited = entry.get('edited', False)
 
         card = tk.Frame(self._strip_inner, bg=self.BG_CELL,
                         highlightthickness=2,
                         highlightbackground=self.ACCENT if is_active
                                             else self.DIVIDER)
-        card.pack(side='left', padx=5, pady=6)
+        card.pack(side='left', padx=4, pady=5)
 
-        if is_active:
-            tk.Frame(card, bg=self.ACCENT, height=3).pack(fill='x', side='top')
+        # ── Obere Leiste: Typ-Badge + Edited-Indicator ──
+        top_row = tk.Frame(card, bg=self.ACCENT if is_active else self.BG_CELL)
+        top_row.pack(fill='x', side='top')
 
+        # Typ-Badge aus save_path ableiten
+        save_path = entry.get('save_path', '') or ''
+        ext = os.path.splitext(save_path)[1].lower() if save_path else '.png'
+        ext_label = ext.lstrip('.').upper() or 'PNG'
+        badge_colors = {'PNG': '#10B981', 'JPG': '#F59E0B', 'JPEG': '#F59E0B',
+                        'PDF': '#EF4444', 'BMP': '#8B5CF6'}
+        badge_bg = badge_colors.get(ext_label, '#64748B')
+
+        tk.Label(top_row, text=ext_label, bg=badge_bg, fg='white',
+                 font=(FONT_FAMILY, 6, 'bold'), padx=3, pady=0
+                 ).pack(side='left', padx=(3, 0), pady=1)
+
+        if is_edited:
+            tk.Label(top_row, text='✎', bg=top_row.cget('bg'),
+                     fg='#F59E0B', font=(FONT_FAMILY, 8)
+                     ).pack(side='left', padx=1)
+
+        # ✕ Löschen-Button oben rechts
+        del_btn = tk.Button(
+            top_row, text='✕', font=(FONT_FAMILY, 6),
+            bg=top_row.cget('bg'), fg=self.FG_MUTED,
+            activebackground=self.DANGER, activeforeground='white',
+            relief='flat', padx=2, pady=0, bd=0, cursor='hand2',
+            command=lambda eid=entry['id']:
+                self._delete_history_entry(eid))
+        del_btn.pack(side='right', padx=(0, 2))
+
+        # ── Thumbnail ──
         if thumb_img:
             photo = ImageTk.PhotoImage(thumb_img)
             self._thumb_photos.append(photo)
             img_lbl = tk.Label(card, image=photo, bg=self.BG_CELL,
                                cursor='hand2')
-            img_lbl.pack(padx=4, pady=(3 if not is_active else 0, 0))
+            img_lbl.pack(padx=3, pady=(2, 0))
             img_lbl.bind('<Button-1>',
                 lambda e, eid=entry['id']: self._load_from_history(eid))
         else:
             img_lbl = tk.Label(card, text='?', bg=self.BG_CELL,
-                               fg=self.FG_MUTED, width=14, height=5)
-            img_lbl.pack(padx=4, pady=3)
+                               fg=self.FG_MUTED, width=14, height=4)
+            img_lbl.pack(padx=3, pady=2)
 
-        ts = entry.get('timestamp_display', '')[-8:]
-        time_lbl = tk.Label(card, text=ts, bg=self.BG_CELL,
-                            fg=self.ACCENT if is_active else self.FG_MUTED,
-                            font=(FONT_FAMILY, 7,
-                                  'bold' if is_active else 'normal'))
-        time_lbl.pack(pady=(1, 0))
+        # ── Metadaten-Zeile: Uhrzeit + Pfad ──
+        meta_frame = tk.Frame(card, bg=self.BG_CELL)
+        meta_frame.pack(fill='x', padx=2, pady=(1, 3))
 
-        del_btn = tk.Button(card, text='✕', font=(FONT_FAMILY, 7),
-                            bg=self.BG_CELL, fg=self.FG_MUTED,
-                            activebackground=self.DANGER,
-                            activeforeground='white',
-                            relief='flat', padx=4, pady=1,
-                            bd=0, cursor='hand2',
-                            command=lambda eid=entry['id']:
-                                self._delete_history_entry(eid))
-        del_btn.pack(fill='x', padx=3, pady=(0, 3))
+        ts = entry.get('timestamp_display', '')[-8:]  # HH:MM:SS
+        tk.Label(meta_frame, text=ts, bg=self.BG_CELL,
+                 fg=self.ACCENT if is_active else self.FG_MUTED,
+                 font=(FONT_FAMILY, 6,
+                       'bold' if is_active else 'normal')
+                 ).pack(side='left')
 
+        # Speicherpfad (gekürzt)
+        if save_path:
+            short = self._short_path(os.path.dirname(save_path), max_len=14)
+            path_lbl = tk.Label(meta_frame, text=short, bg=self.BG_CELL,
+                                fg='#94A3B8', font=(FONT_FAMILY, 5))
+            path_lbl.pack(side='right')
+            self._add_tooltip(path_lbl, save_path)
+
+        # ── Hover + Rechtsklick ──
         def on_card_enter(e):
             card.config(highlightbackground=self.ACCENT)
         def on_card_leave(e):
             card.config(highlightbackground=self.ACCENT if is_active
                                             else self.DIVIDER)
-        for w in [card, img_lbl, time_lbl]:
+        def on_card_rclick(e, eid=entry['id'], edited=is_edited):
+            self._filmstrip_context_menu(e, eid, edited)
+
+        for w in [card, img_lbl, meta_frame]:
             w.bind('<Enter>', on_card_enter)
             w.bind('<Leave>', on_card_leave)
+            if IS_MACOS:
+                w.bind('<Button-2>', on_card_rclick)
+                w.bind('<Control-Button-1>', on_card_rclick)
+            else:
+                w.bind('<Button-3>', on_card_rclick)
 
         del_btn.bind('<Enter>',
             lambda e: del_btn.config(bg=self.DANGER, fg='white'))
         del_btn.bind('<Leave>',
-            lambda e: del_btn.config(bg=self.BG_CELL, fg=self.FG_MUTED))
+            lambda e: del_btn.config(
+                bg=top_row.cget('bg'), fg=self.FG_MUTED))
+
+    def _filmstrip_context_menu(self, event, entry_id: str, is_edited: bool):
+        """Rechtsklick-Kontextmenü für Filmstrip-Karten."""
+        menu = tk.Menu(self._strip_canvas, tearoff=0,
+                       bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
+                       activebackground=self.ACCENT,
+                       activeforeground='white')
+        menu.add_command(label='Im Editor öffnen',
+                         command=lambda: self._load_from_history(entry_id))
+        if is_edited and self.history.has_original(entry_id):
+            menu.add_command(
+                label='⟲ Original laden',
+                command=lambda: self._restore_original_for(entry_id))
+        menu.add_separator()
+        menu.add_command(label='Im Finder zeigen',
+                         command=lambda: self._reveal_in_finder(entry_id))
+        menu.add_separator()
+        menu.add_command(label='Löschen',
+                         command=lambda: self._delete_history_entry(entry_id))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _restore_original_for(self, entry_id: str):
+        """Lädt das Original eines beliebigen Verlauf-Eintrags."""
+        orig = self.history.load_original(entry_id)
+        if orig is None:
+            self._show_toast('Original nicht verfügbar', is_error=True)
+            return
+        self._push_undo(save_image=True)
+        self._current_entry_id = entry_id
+        self.image = orig
+        self.annotations.clear()
+        self._step_counter = 0
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._refresh_filmstrip()
+        self._show_toast('✓  Original wiederhergestellt')
+
+    def _reveal_in_finder(self, entry_id: str):
+        """Öffnet den Finder/Explorer am Speicherort des Bildes."""
+        entry = self.history.get_entry(entry_id)
+        if not entry:
+            return
+        save_path = entry.get('save_path', '')
+        if save_path and os.path.exists(save_path):
+            target = save_path
+        else:
+            target = self.history.get_file_path(entry_id) or ''
+        if not os.path.exists(target):
+            self._show_toast('Datei nicht gefunden', is_error=True)
+            return
+        if IS_MACOS:
+            subprocess.Popen(['open', '-R', target])
+        elif IS_WINDOWS:
+            subprocess.Popen(['explorer', '/select,', target])
+        else:
+            subprocess.Popen(['xdg-open', os.path.dirname(target)])
 
     def _load_from_history(self, entry_id: str):
         img = self.history.load_image(entry_id)
@@ -1253,6 +1444,29 @@ class AnnotationEditor(_Theme):
         self._refresh_filmstrip()
         self._update_undo_redo_state()
         self._status_var.set('Bild aus Verlauf geladen')
+
+    def _restore_original(self):
+        """Lädt das unbearbeitete Original für den aktuellen Eintrag."""
+        if not self._current_entry_id:
+            self._show_toast('Kein Bild im Verlauf aktiv', is_error=True)
+            return
+        if not self.history.has_original(self._current_entry_id):
+            self._show_toast('Kein Original vorhanden', is_error=True)
+            return
+        orig = self.history.load_original(self._current_entry_id)
+        if orig is None:
+            self._show_toast('Original konnte nicht geladen werden',
+                             is_error=True)
+            return
+        self._push_undo(save_image=True)
+        self.image = orig
+        self.annotations.clear()
+        self._step_counter = 0
+        self._redraw_canvas()
+        self._update_undo_redo_state()
+        self._refresh_filmstrip()
+        self._show_toast('✓  Original wiederhergestellt')
+        self._status_var.set('Original wiederhergestellt')
 
     def _delete_history_entry(self, entry_id: str):
         self.history.remove(entry_id)
@@ -1334,6 +1548,7 @@ class AnnotationEditor(_Theme):
         self.win.bind(f'<{mod}-y>', lambda e: self._redo())
         self.win.bind(f'<{mod}-s>', lambda e: self.save_to_file())
         self.win.bind(f'<{mod}-c>', lambda e: self.copy_to_clipboard())
+        self.win.bind(f'<{mod}-Shift-o>', lambda e: self._restore_original())
         for i, (tool_id, _, _) in enumerate(self.TOOLS):
             if i < 9:
                 self.win.bind(str(i + 1),
@@ -1346,8 +1561,18 @@ class AnnotationEditor(_Theme):
     # Tool-Steuerung
     # ------------------------------------------------------------------
 
+    def _rebind_mouse(self):
+        """Stellt die Standard-Maus-Bindings wieder her (nach Callout etc.)."""
+        self.canvas.bind('<ButtonPress-1>', self._on_mouse_down)
+
     def _select_tool(self, tool_id: str):
         self.active_tool = tool_id
+        # Callout-Pending-Zustand bereinigen, falls Tool gewechselt wird
+        if tool_id != 'callout' and hasattr(self, '_callout_text'):
+            self._rebind_mouse()
+        # Auswahl aufheben wenn von Select weg gewechselt
+        if tool_id != 'select':
+            self._deselect()
         for tid, btn in self._tool_buttons.items():
             btn.configure(style='ToolSel.TButton' if tid == tool_id
                                 else 'Tool.TButton')
@@ -1383,9 +1608,73 @@ class AnnotationEditor(_Theme):
     def _canvas_coords(self, event):
         return int(self.canvas.canvasx(event.x)), int(self.canvas.canvasy(event.y))
 
+    # ------------------------------------------------------------------
+    # Select / Move – Annotation verschieben
+    # ------------------------------------------------------------------
+
+    def _move_annotation(self, ann: Annotation, dx: int, dy: int):
+        """Verschiebt eine einzelne Annotation um (dx, dy) Pixel."""
+        ann.x1 += dx; ann.y1 += dy
+        ann.x2 += dx; ann.y2 += dy
+        ann.tail_x += dx; ann.tail_y += dy
+        ann.points = [(px + dx, py + dy) for px, py in ann.points]
+
+    def _draw_selection_rect(self, ann: Annotation):
+        """Zeichnet einen gestrichelten Auswahlrahmen um die Annotation."""
+        self.canvas.delete('selection')
+        if ann.kind == 'freehand' and ann.points:
+            xs = [p[0] for p in ann.points]
+            ys = [p[1] for p in ann.points]
+            bx1, by1, bx2, by2 = min(xs) - 4, min(ys) - 4, max(xs) + 4, max(ys) + 4
+        elif ann.kind == 'step':
+            r = max(16, ann.font_size) + 4
+            bx1, by1 = ann.x1 - 4, ann.y1 - 4
+            bx2, by2 = ann.x1 + 2 * r + 4, ann.y1 + 2 * r + 4
+        elif ann.kind == 'text':
+            tw = len(ann.text) * ann.font_size * 0.6
+            th = ann.font_size * 1.4
+            bx1, by1 = ann.x1 - 4, ann.y1 - 4
+            bx2, by2 = ann.x1 + tw + 4, ann.y1 + th + 4
+        else:
+            bx1 = min(ann.x1, ann.x2) - 4
+            by1 = min(ann.y1, ann.y2) - 4
+            bx2 = max(ann.x1, ann.x2) + 4
+            by2 = max(ann.y1, ann.y2) + 4
+        self.canvas.create_rectangle(
+            bx1, by1, bx2, by2,
+            outline=self.ACCENT, width=2, dash=(6, 4), tag='selection')
+
+    def _deselect(self):
+        """Hebt die aktuelle Auswahl auf."""
+        self._selected_idx = None
+        self._move_dragging = False
+        self.canvas.delete('selection')
+
+    # ------------------------------------------------------------------
+    # Maus-Events
+    # ------------------------------------------------------------------
+
     def _on_mouse_down(self, event):
+        x, y = self._canvas_coords(event)
+
+        # ── Select-Tool: Klick auf Annotation → auswählen / verschieben
+        if self.active_tool == 'select':
+            hit = self._hit_test(x, y)
+            if hit is not None:
+                self._selected_idx = hit
+                self._move_dragging = True
+                self._move_last = (x, y)
+                self._move_undo_pushed = False   # Undo erst bei Bewegung
+                self._draw_selection_rect(self.annotations[hit])
+                self.canvas.config(cursor='fleur')
+            else:
+                self._deselect()
+                self.canvas.config(cursor='crosshair')
+            return
+
+        # ── Andere Tools: Zeichnen ────────────────────────────────────
+        self._deselect()
         self._drawing    = True
-        x, y             = self._canvas_coords(event)
         self._drag_start = (x, y)
         if self.active_tool == 'text':
             self._handle_text(x, y)
@@ -1399,10 +1688,27 @@ class AnnotationEditor(_Theme):
             self._drawing = False
 
     def _on_mouse_drag(self, event):
+        x, y = self._canvas_coords(event)
+
+        # ── Select-Tool: Annotation verschieben
+        if self._move_dragging and self._selected_idx is not None:
+            lx, ly = self._move_last
+            dx, dy = x - lx, y - ly
+            if dx == 0 and dy == 0:
+                return
+            # Undo erst bei tatsächlicher Bewegung pushen
+            if not getattr(self, '_move_undo_pushed', False):
+                self._push_undo()
+                self._move_undo_pushed = True
+            self._move_annotation(self.annotations[self._selected_idx], dx, dy)
+            self._move_last = (x, y)
+            self._redraw_canvas()
+            self._draw_selection_rect(self.annotations[self._selected_idx])
+            return
+
         if not self._drawing:
             return
-        x, y    = self._canvas_coords(event)
-        x0, y0  = self._drag_start
+        x0, y0 = self._drag_start
         if self.active_tool == 'freehand':
             self._freehand_points.append((x, y))
             self._draw_freehand_preview()
@@ -1410,6 +1716,18 @@ class AnnotationEditor(_Theme):
         self._draw_preview(x0, y0, x, y)
 
     def _on_mouse_up(self, event):
+        # ── Select-Tool: Drop
+        if self._move_dragging:
+            self._move_dragging = False
+            self.canvas.config(cursor='crosshair')
+            if self._selected_idx is not None:
+                self._redraw_canvas()
+                self._draw_selection_rect(
+                    self.annotations[self._selected_idx])
+                self._update_undo_redo_state()
+                self._status_var.set('Annotation verschoben')
+            return
+
         if not self._drawing:
             return
         self._drawing = False
@@ -1569,40 +1887,34 @@ class AnnotationEditor(_Theme):
         self.image = self.image.crop((cx1, cy1, cx2, cy2))
         self._finish_image_op(f'Zugeschnitten auf {cx2-cx1} × {cy2-cy1} px')
 
-    def _on_right_click(self, event):
-        x, y = self._canvas_coords(event)
-        # Finde die letzte (oberste) Annotation unter dem Klick
-        hit_idx = None
+    def _hit_test(self, x: int, y: int) -> int | None:
+        """Findet die oberste Annotation unter (x, y). Gibt Index oder None."""
         for i in range(len(self.annotations) - 1, -1, -1):
             ann = self.annotations[i]
             if ann.kind == 'freehand':
-                # Prüfe ob Punkt in der Nähe eines Freehand-Segments liegt
                 for px, py in ann.points:
                     if abs(px - x) < 10 and abs(py - y) < 10:
-                        hit_idx = i
-                        break
-                if hit_idx is not None:
-                    break
+                        return i
             elif ann.kind == 'step':
                 r = max(16, ann.font_size)
                 cx, cy = ann.x1 + r, ann.y1 + r
                 if (x - cx) ** 2 + (y - cy) ** 2 <= (r + 4) ** 2:
-                    hit_idx = i
-                    break
+                    return i
             elif ann.kind == 'text':
-                # Ungefährer Treffer-Test für Text
                 tw = len(ann.text) * ann.font_size * 0.6
                 th = ann.font_size * 1.4
                 if ann.x1 <= x <= ann.x1 + tw and ann.y1 <= y <= ann.y1 + th:
-                    hit_idx = i
-                    break
+                    return i
             else:
                 ax1, ay1 = min(ann.x1, ann.x2), min(ann.y1, ann.y2)
                 ax2, ay2 = max(ann.x1, ann.x2), max(ann.y1, ann.y2)
                 if ax1 - 5 <= x <= ax2 + 5 and ay1 - 5 <= y <= ay2 + 5:
-                    hit_idx = i
-                    break
+                    return i
+        return None
 
+    def _on_right_click(self, event):
+        x, y = self._canvas_coords(event)
+        hit_idx = self._hit_test(x, y)
         if hit_idx is None:
             return
         menu = tk.Menu(self.canvas, tearoff=0)
@@ -1613,15 +1925,21 @@ class AnnotationEditor(_Theme):
 
     def _delete_annotation(self, idx: int):
         self._push_undo()
+        # Auswahl zurücksetzen (Index wird ungültig)
+        self._deselect()
         del self.annotations[idx]
-        self._step_counter = max(
-            (a.number for a in self.annotations if a.kind == 'step'),
-            default=0)
+        self._recalc_step_counter()
         self._finish_image_op('Annotation gelöscht')
 
     # ------------------------------------------------------------------
     # Undo / Commit
     # ------------------------------------------------------------------
+
+    def _recalc_step_counter(self):
+        """Berechnet _step_counter aus den vorhandenen Annotations."""
+        self._step_counter = max(
+            (a.number for a in self.annotations if a.kind == 'step'),
+            default=0)
 
     def _commit(self, ann: Annotation):
         self._push_undo()
@@ -1633,15 +1951,12 @@ class AnnotationEditor(_Theme):
         if not self.undo_stack:
             return
         prev_anns, prev_img = self.undo_stack.pop()
-        # Redo muss das aktuelle Bild speichern falls es sich ändert
         redo_img = self.image.copy() if prev_img is not None else None
         self.redo_stack.append((deepcopy(self.annotations), redo_img))
         self.annotations = prev_anns
         if prev_img is not None:
             self.image = prev_img
-        self._step_counter = max(
-            (a.number for a in self.annotations if a.kind == 'step'),
-            default=0)
+        self._recalc_step_counter()
         self._redraw_canvas()
         self._update_undo_redo_state()
 
@@ -1654,9 +1969,7 @@ class AnnotationEditor(_Theme):
         self.annotations = next_anns
         if next_img is not None:
             self.image = next_img
-        self._step_counter = max(
-            (a.number for a in self.annotations if a.kind == 'step'),
-            default=0)
+        self._recalc_step_counter()
         self._redraw_canvas()
         self._update_undo_redo_state()
 
@@ -1879,6 +2192,8 @@ class AnnotationEditor(_Theme):
         self.win.update_idletasks()
         try:
             self._save_image_to_path(self._composite_image(), path)
+            # Speicherpfad im Verlauf merken
+            self._update_entry_save_path(path)
             short = self._short_path(save_dir)
             self._status_var.set(f'✓ {filename} ({short})')
             self._show_toast(f'✓  {filename}  →  {short}')
@@ -1903,6 +2218,7 @@ class AnnotationEditor(_Theme):
         self.win.update_idletasks()
         try:
             self._save_image_to_path(self._composite_image(), path)
+            self._update_entry_save_path(path)
             name = os.path.basename(path)
             self._status_var.set(f'✓ Gespeichert: {name}')
             self._show_toast(f'✓  {name}')
@@ -1911,6 +2227,13 @@ class AnnotationEditor(_Theme):
             self._show_toast(f'Fehler: {e}', is_error=True)
         finally:
             self.win.config(cursor='')
+
+    def _update_entry_save_path(self, path: str):
+        """Aktualisiert den gespeicherten Pfad im Verlauf-Eintrag."""
+        if not self._current_entry_id:
+            return
+        self.history.update_save_path(self._current_entry_id, path)
+        self._refresh_filmstrip()
 
     def copy_to_clipboard(self):
         img = self._composite_image()
@@ -1977,22 +2300,21 @@ class AnnotationEditor(_Theme):
     # Bild-Operationen: Resize, Watermark, Shadow, Border
     # ------------------------------------------------------------------
 
+    MAX_UNDO = 40
+
     def _push_undo(self, save_image: bool = False):
-        """Aktuellen Zustand auf den Undo-Stack schieben."""
+        """Aktuellen Zustand auf den Undo-Stack schieben (max MAX_UNDO)."""
         img_copy = self.image.copy() if save_image else None
         self.undo_stack.append((deepcopy(self.annotations), img_copy))
+        # Stack begrenzen um Speicher-Explosion zu verhindern
+        while len(self.undo_stack) > self.MAX_UNDO:
+            self.undo_stack.pop(0)
         self.redo_stack.clear()
 
     def _offset_annotations(self, dx: int, dy: int):
         """Alle Annotations um (dx, dy) Pixel verschieben."""
         for ann in self.annotations:
-            ann.x1     += dx
-            ann.y1     += dy
-            ann.x2     += dx
-            ann.y2     += dy
-            ann.tail_x += dx
-            ann.tail_y += dy
-            ann.points = [(px + dx, py + dy) for px, py in ann.points]
+            self._move_annotation(ann, dx, dy)
 
     def _finish_image_op(self, status_msg: str):
         """Canvas neu zeichnen und Undo-State aktualisieren."""
