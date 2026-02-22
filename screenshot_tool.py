@@ -773,6 +773,7 @@ class AnnotationEditor(_Theme):
         self._build_menu()
         self._build_statusbar()   # side='bottom' → zuerst packen
         self._build_filmstrip()   # side='bottom' → vor Canvas packen!
+        self._build_export_bar()  # side='bottom' → prominente Export-Leiste
         self._build_toolbar()     # side='top'
         self._build_canvas()      # fill='both', expand=True → zuletzt!
         self._bind_shortcuts()
@@ -958,30 +959,6 @@ class AnnotationEditor(_Theme):
         self._add_hover(self._redo_btn, self.BTN_HOV, self.FG_MAIN,
                         self.BTN_NORM, self.BTN_FG)
 
-        # ── Aktions-Buttons rechts ────────────────────────────────────
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='right', fill='y', padx=8, pady=2)
-
-        save_btn = tk.Button(inner, text='💾  Speichern',
-            font=(FONT_FAMILY, 9, 'bold'),
-            bg=self.ACCENT, fg='white',
-            activebackground=self.ACCENT_HOV, activeforeground='white',
-            relief='flat', padx=12, pady=5, bd=0, cursor='hand2',
-            command=self.save_to_file)
-        save_btn.pack(side='right', padx=(2, 0))
-        self._add_hover(save_btn, self.ACCENT_HOV, 'white',
-                        self.ACCENT, 'white')
-
-        copy_btn = tk.Button(inner, text='📋  Kopieren',
-            font=(FONT_FAMILY, 9),
-            bg=self.BTN_NORM, fg=self.BTN_FG,
-            activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
-            relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
-            command=self.copy_to_clipboard)
-        copy_btn.pack(side='right', padx=2)
-        self._add_hover(copy_btn, self.BTN_HOV, self.FG_MAIN,
-                        self.BTN_NORM, self.BTN_FG)
-
         self._select_tool('arrow')
 
     def _build_canvas(self):
@@ -1160,6 +1137,55 @@ class AnnotationEditor(_Theme):
         tk.Label(row, textvariable=self._status_var, anchor='w',
                  bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
                  font=(FONT_FAMILY, 8)).pack(side='left', padx=(4, 0))
+
+    def _build_export_bar(self):
+        """Prominente Export-Leiste unter dem Canvas."""
+        tk.Frame(self.win, bg=self.DIVIDER, height=1).pack(
+            side='bottom', fill='x')
+
+        bar = tk.Frame(self.win, bg=self.BG_TOOLBAR, height=44)
+        bar.pack(side='bottom', fill='x')
+        bar.pack_propagate(False)
+
+        inner = tk.Frame(bar, bg=self.BG_TOOLBAR)
+        inner.pack(fill='both', expand=True, padx=8, pady=6)
+
+        # Label links
+        tk.Label(inner, text='EXPORT', bg=self.BG_TOOLBAR,
+                 fg=self.FG_MUTED, font=(FONT_FAMILY, 8, 'bold')
+                 ).pack(side='left', padx=(4, 12))
+
+        # Quick-Export-Buttons
+        export_actions = [
+            ('📋  In Zwischenablage',  self.copy_to_clipboard,
+             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
+            ('💾  Als PNG speichern',  lambda: self._quick_save('png'),
+             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
+            ('🖼  Als JPG speichern',  lambda: self._quick_save('jpg'),
+             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
+            ('📄  Als PDF speichern',  lambda: self._quick_save('pdf'),
+             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
+        ]
+        for text, cmd, bg, fg, hover_bg, hover_fg in export_actions:
+            btn = tk.Button(inner, text=text, font=(FONT_FAMILY, 9),
+                            bg=bg, fg=fg, activebackground=hover_bg,
+                            activeforeground=hover_fg, relief='flat',
+                            padx=10, pady=3, bd=0, cursor='hand2',
+                            command=cmd)
+            btn.pack(side='left', padx=3)
+            self._add_hover(btn, hover_bg, hover_fg, bg, fg)
+
+        # Speichern unter … (Akzent-Button rechts)
+        save_as = tk.Button(inner, text='💾  Speichern unter …',
+                            font=(FONT_FAMILY, 9, 'bold'),
+                            bg=self.ACCENT, fg='white',
+                            activebackground=self.ACCENT_HOV,
+                            activeforeground='white',
+                            relief='flat', padx=14, pady=3, bd=0,
+                            cursor='hand2', command=self.save_to_file)
+        save_as.pack(side='right', padx=(8, 4))
+        self._add_hover(save_as, self.ACCENT_HOV, 'white',
+                        self.ACCENT, 'white')
 
     def _bind_shortcuts(self):
         # macOS: Command statt Control
@@ -1664,6 +1690,27 @@ class AnnotationEditor(_Theme):
     # ------------------------------------------------------------------
     # Speichern / Clipboard
     # ------------------------------------------------------------------
+
+    def _quick_save(self, fmt: str):
+        """Schnell-Export als PNG/JPG/PDF auf den Desktop."""
+        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+        if not os.path.isdir(desktop):
+            desktop = os.path.expanduser('~')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'screenshot_{timestamp}.{fmt}'
+        path = os.path.join(desktop, filename)
+
+        img = self._composite_image()
+        try:
+            if fmt == 'pdf':
+                img.convert('RGB').save(path, 'PDF', resolution=150)
+            elif fmt == 'jpg':
+                img.convert('RGB').save(path, quality=95)
+            else:
+                img.save(path)
+            self._status_var.set(f'Gespeichert: {filename} (Desktop)')
+        except Exception as e:
+            self._status_var.set(f'Fehler beim Speichern: {e}')
 
     def save_to_file(self):
         default = datetime.now().strftime('screenshot_%Y%m%d_%H%M%S.png')
