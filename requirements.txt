@@ -1,6 +1,8 @@
 Pillow
 mss
 pyautogui
-pywin32; sys_platform == "win32"
-keyboard
 numpy
+pywin32; sys_platform == "win32"
+keyboard; sys_platform == "win32"
+pyobjc-framework-Quartz; sys_platform == "darwin"
+pynput; sys_platform == "darwin"

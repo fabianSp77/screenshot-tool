@@ -2,24 +2,32 @@
 screenshot_tool.py  –  Snagit-ähnliches Screenshot-Tool (Alles in einer Datei)
 ===============================================================================
 Start:  python screenshot_tool.py
-        oder Doppelklick auf start.pyw (kein Terminal-Fenster)
+        oder Doppelklick auf start.pyw (kein Terminal-Fenster, Windows)
 
 Abhängigkeiten (einmalig installieren):
-    pip install --user Pillow mss pyautogui pywin32 keyboard numpy
+    Windows:  pip install --user Pillow mss pyautogui pywin32 keyboard numpy
+    macOS:    pip install --user Pillow mss pyautogui pyobjc-framework-Quartz pynput numpy
 
 Hotkeys (auch im Hintergrund aktiv):
-    Print Screen       → Region auswählen
-    Ctrl+Shift+F       → Vollbild
-    Ctrl+Shift+W       → Fenster auswählen
-    Ctrl+Shift+S       → Scrolling Capture
+    Windows:
+        Print Screen       → Region auswählen
+        Ctrl+Shift+F       → Vollbild
+        Ctrl+Shift+W       → Fenster auswählen
+        Ctrl+Shift+S       → Scrolling Capture
+    macOS:
+        Cmd+Shift+1        → Region auswählen
+        Cmd+Shift+F        → Vollbild
+        Cmd+Shift+W        → Fenster auswählen
+        Cmd+Shift+S        → Scrolling Capture
 """
 
 import sys
-import ctypes
 import io
 import json
 import math
 import os
+import subprocess
+import tempfile
 import time
 import tkinter as tk
 from tkinter import filedialog, simpledialog, colorchooser, messagebox
@@ -27,37 +35,79 @@ from dataclasses import dataclass
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageTk
 
+# ── Plattform-Erkennung ─────────────────────────────────────────────────────
+IS_WINDOWS = sys.platform == 'win32'
+IS_MACOS   = sys.platform == 'darwin'
 
-# ── CMD-Fenster verstecken (Windows) ────────────────────────────────────────
-try:
-    import ctypes as _ct
-    _ct.windll.user32.ShowWindow(
-        _ct.windll.kernel32.GetConsoleWindow(), 0)
-except Exception:
-    pass
+FONT_FAMILY = 'Segoe UI' if IS_WINDOWS else 'Helvetica Neue'
 
-# DPI-Bewusstsein MUSS vor dem ersten Tk-Fenster gesetzt werden
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
+
+def _get_truetype_font(size: int):
+    """Plattformspezifische TrueType-Schrift für PIL."""
+    paths = []
+    if IS_WINDOWS:
+        paths = ['segoeui.ttf', 'arial.ttf']
+    elif IS_MACOS:
+        paths = [
+            '/System/Library/Fonts/Helvetica.ttc',
+            '/System/Library/Fonts/HelveticaNeue.ttc',
+            '/Library/Fonts/Arial.ttf',
+        ]
+    for p in paths:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+# ── CMD-Fenster verstecken & DPI (nur Windows) ─────────────────────────────
+if IS_WINDOWS:
+    import ctypes
     try:
-        ctypes.windll.user32.SetProcessDPIAware()
+        ctypes.windll.user32.ShowWindow(
+            ctypes.windll.kernel32.GetConsoleWindow(), 0)
     except Exception:
         pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Abhängigkeiten prüfen
 # ---------------------------------------------------------------------------
 
-REQUIRED = {
-    'PIL':       'Pillow',
-    'mss':       'mss',
-    'pyautogui': 'pyautogui',
-    'win32gui':  'pywin32',
-    'keyboard':  'keyboard',
-    'numpy':     'numpy',
-}
+if IS_WINDOWS:
+    REQUIRED = {
+        'PIL':       'Pillow',
+        'mss':       'mss',
+        'pyautogui': 'pyautogui',
+        'win32gui':  'pywin32',
+        'keyboard':  'keyboard',
+        'numpy':     'numpy',
+    }
+elif IS_MACOS:
+    REQUIRED = {
+        'PIL':       'Pillow',
+        'mss':       'mss',
+        'pyautogui': 'pyautogui',
+        'Quartz':    'pyobjc-framework-Quartz',
+        'pynput':    'pynput',
+        'numpy':     'numpy',
+    }
+else:
+    REQUIRED = {
+        'PIL':       'Pillow',
+        'mss':       'mss',
+        'pyautogui': 'pyautogui',
+        'numpy':     'numpy',
+    }
+
 
 def check_dependencies() -> bool:
     missing = []
@@ -264,7 +314,7 @@ class RegionOverlay:
         self.canvas.create_text(
             self.win.winfo_screenwidth() // 2, 30,
             text='Bereich auswählen  |  ESC = Abbrechen',
-            fill='white', font=('Segoe UI', 14), tag='hint')
+            fill='white', font=(FONT_FAMILY, 14), tag='hint')
 
         self.canvas.bind('<ButtonPress-1>',   self._on_down)
         self.canvas.bind('<B1-Motion>',        self._on_drag)
@@ -320,7 +370,7 @@ class RegionOverlay:
             fill='#003344', outline='', tag='selection')
         self.canvas.create_text(
             tx, ty, text=lbl, fill='#00D4FF',
-            font=('Segoe UI', 10, 'bold'), anchor='nw', tag='selection')
+            font=(FONT_FAMILY, 10, 'bold'), anchor='nw', tag='selection')
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +391,7 @@ class WindowPickerDialog:
 
         tk.Label(self.dialog,
                  text='Wähle das Fenster aus, das aufgenommen werden soll:',
-                 font=('Segoe UI', 10)).pack(padx=10, pady=8, anchor='w')
+                 font=(FONT_FAMILY, 10)).pack(padx=10, pady=8, anchor='w')
 
         frame = tk.Frame(self.dialog)
         frame.pack(fill='both', expand=True, padx=10, pady=4)
@@ -350,21 +400,21 @@ class WindowPickerDialog:
         scrollbar.pack(side='right', fill='y')
 
         self.listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set,
-                                  font=('Segoe UI', 10), selectmode='single')
+                                  font=(FONT_FAMILY, 10), selectmode='single')
         self.listbox.pack(fill='both', expand=True)
         scrollbar.config(command=self.listbox.yview)
 
         self.windows = self._get_windows()
-        for hwnd, title in self.windows:
+        for wid, title in self.windows:
             self.listbox.insert('end', title)
 
         btn_frame = tk.Frame(self.dialog)
         btn_frame.pack(fill='x', padx=10, pady=8)
         tk.Button(btn_frame, text='Aufnehmen', command=self._on_ok,
                   bg='#0078D4', fg='white',
-                  font=('Segoe UI', 10)).pack(side='right', padx=4)
+                  font=(FONT_FAMILY, 10)).pack(side='right', padx=4)
         tk.Button(btn_frame, text='Abbrechen', command=self._on_cancel,
-                  font=('Segoe UI', 10)).pack(side='right', padx=4)
+                  font=(FONT_FAMILY, 10)).pack(side='right', padx=4)
 
         self.parent.wait_window(self.dialog)
         return self.result
@@ -380,18 +430,37 @@ class WindowPickerDialog:
 
     @staticmethod
     def _get_windows():
-        try:
-            import win32gui
-            def callback(hwnd, result):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if title.strip():
-                        result.append((hwnd, title))
-            wins = []
-            win32gui.EnumWindows(callback, wins)
-            return wins
-        except ImportError:
-            return []
+        if IS_WINDOWS:
+            try:
+                import win32gui
+                def callback(hwnd, result):
+                    if win32gui.IsWindowVisible(hwnd):
+                        title = win32gui.GetWindowText(hwnd)
+                        if title.strip():
+                            result.append((hwnd, title))
+                wins = []
+                win32gui.EnumWindows(callback, wins)
+                return wins
+            except ImportError:
+                return []
+        elif IS_MACOS:
+            try:
+                import Quartz
+                options = Quartz.kCGWindowListOptionOnScreenOnly
+                window_list = Quartz.CGWindowListCopyWindowInfo(
+                    options, Quartz.kCGNullWindowID)
+                wins = []
+                for win in window_list:
+                    name = win.get(Quartz.kCGWindowOwnerName, '')
+                    title = win.get(Quartz.kCGWindowName, '')
+                    wid = win.get(Quartz.kCGWindowNumber, 0)
+                    display = f'{name} – {title}' if title else name
+                    if display.strip() and win.get(Quartz.kCGWindowLayer, 99) == 0:
+                        wins.append((wid, display))
+                return wins
+            except ImportError:
+                return []
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +475,14 @@ class CaptureEngine:
             raw = sct.grab(mon)
             return Image.frombytes('RGB', raw.size, raw.bgra, 'raw', 'BGRX')
 
-    def capture_window(self, hwnd: int) -> Image.Image:
+    def capture_window(self, wid: int) -> Image.Image:
+        if IS_WINDOWS:
+            return self._capture_window_win(wid)
+        elif IS_MACOS:
+            return self._capture_window_mac(wid)
+        raise RuntimeError('Fenster-Capture wird auf dieser Plattform nicht unterstützt')
+
+    def _capture_window_win(self, hwnd: int) -> Image.Image:
         try:
             import win32gui, win32ui
             from ctypes import windll
@@ -453,6 +529,24 @@ class CaptureEngine:
                 raw = sct.grab(mon)
                 return Image.frombytes('RGB', raw.size,
                                        raw.bgra, 'raw', 'BGRX')
+
+    def _capture_window_mac(self, wid: int) -> Image.Image:
+        import Quartz
+        cg_image = Quartz.CGWindowListCreateImage(
+            Quartz.CGRectNull,
+            Quartz.kCGWindowListOptionIncludingWindow,
+            wid,
+            Quartz.kCGWindowImageBoundsIgnoreFraming)
+        if cg_image is None:
+            raise RuntimeError('Fenster konnte nicht aufgenommen werden')
+
+        w = Quartz.CGImageGetWidth(cg_image)
+        h = Quartz.CGImageGetHeight(cg_image)
+        bpr = Quartz.CGImageGetBytesPerRow(cg_image)
+        provider = Quartz.CGImageGetDataProvider(cg_image)
+        data = Quartz.CGDataProviderCopyData(provider)
+        img = Image.frombuffer('RGBA', (w, h), data, 'raw', 'BGRA', bpr, 1)
+        return img.convert('RGB')
 
     def capture_scrolling(self, region: tuple,
                           scroll_pause: float = 0.5,
@@ -694,19 +788,21 @@ class AnnotationEditor:
     # ------------------------------------------------------------------
 
     def _build_menu(self):
+        # Tastenkürzel-Labels plattformabhängig
+        mod = 'Cmd' if IS_MACOS else 'Ctrl'
         mb = tk.Menu(self.win, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
                      activebackground=self.ACCENT, activeforeground='white')
         fm = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
                      activebackground=self.ACCENT, activeforeground='white')
-        fm.add_command(label='Speichern  Ctrl+S',       command=self.save_to_file)
-        fm.add_command(label='In Zwischenablage  Ctrl+C', command=self.copy_to_clipboard)
+        fm.add_command(label=f'Speichern  {mod}+S',       command=self.save_to_file)
+        fm.add_command(label=f'In Zwischenablage  {mod}+C', command=self.copy_to_clipboard)
         fm.add_separator()
         fm.add_command(label='Schließen',               command=self._on_close)
         mb.add_cascade(label='Datei', menu=fm)
 
         em = tk.Menu(mb, tearoff=0, bg=self.BG_TOOLBAR, fg=self.FG_MAIN,
                      activebackground=self.ACCENT, activeforeground='white')
-        em.add_command(label='Rückgängig  Ctrl+Z', command=self._undo)
+        em.add_command(label=f'Rückgängig  {mod}+Z', command=self._undo)
         mb.add_cascade(label='Bearbeiten', menu=em)
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
@@ -724,7 +820,7 @@ class AnnotationEditor:
         for tool_id, symbol, label in self.TOOLS:
             btn = tk.Button(
                 inner, text=f'{symbol}  {label}',
-                font=('Segoe UI', 9),
+                font=(FONT_FAMILY, 9),
                 bg=self.BTN_NORM, fg=self.BTN_FG,
                 activebackground=self.ACCENT, activeforeground='white',
                 relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
@@ -738,7 +834,7 @@ class AnnotationEditor:
 
         # Farb-Swatch
         tk.Label(inner, text='Farbe', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=('Segoe UI', 8)).pack(side='left', padx=(0, 4))
+                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 4))
         self._color_swatch = tk.Frame(
             inner, bg=self.tool_color, width=24, height=24,
             highlightthickness=2, highlightbackground=self.DIVIDER,
@@ -756,10 +852,10 @@ class AnnotationEditor:
 
         # Strichbreite
         tk.Label(inner, text='Breite', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=('Segoe UI', 8)).pack(side='left', padx=(0, 3))
+                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
         self._width_var = tk.IntVar(value=self.tool_width)
         tk.Spinbox(inner, from_=1, to=20, textvariable=self._width_var,
-                   width=3, font=('Segoe UI', 9), relief='flat',
+                   width=3, font=(FONT_FAMILY, 9), relief='flat',
                    bg=self.BTN_NORM, fg=self.FG_MAIN,
                    buttonbackground=self.BTN_NORM,
                    command=self._update_width).pack(side='left', padx=(0, 8))
@@ -769,10 +865,10 @@ class AnnotationEditor:
 
         # Schriftgröße
         tk.Label(inner, text='Schrift', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=('Segoe UI', 8)).pack(side='left', padx=(0, 3))
+                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
         self._font_var = tk.IntVar(value=self.font_size)
         tk.Spinbox(inner, from_=8, to=72, textvariable=self._font_var,
-                   width=3, font=('Segoe UI', 9), relief='flat',
+                   width=3, font=(FONT_FAMILY, 9), relief='flat',
                    bg=self.BTN_NORM, fg=self.FG_MAIN,
                    buttonbackground=self.BTN_NORM,
                    command=self._update_font).pack(side='left')
@@ -782,7 +878,7 @@ class AnnotationEditor:
             side='left', fill='y', padx=8, pady=2)
 
         undo_btn = tk.Button(inner, text='↩  Zurück',
-            font=('Segoe UI', 9),
+            font=(FONT_FAMILY, 9),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
             relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
@@ -792,7 +888,7 @@ class AnnotationEditor:
                         self.BTN_NORM, self.BTN_FG)
 
         redo_btn = tk.Button(inner, text='↪  Vor',
-            font=('Segoe UI', 9),
+            font=(FONT_FAMILY, 9),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
             relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
@@ -806,7 +902,7 @@ class AnnotationEditor:
             side='right', fill='y', padx=8, pady=2)
 
         save_btn = tk.Button(inner, text='💾  Speichern',
-            font=('Segoe UI', 9, 'bold'),
+            font=(FONT_FAMILY, 9, 'bold'),
             bg=self.ACCENT, fg='white',
             activebackground=self.ACCENT_HOV, activeforeground='white',
             relief='flat', padx=12, pady=5, bd=0, cursor='hand2',
@@ -816,7 +912,7 @@ class AnnotationEditor:
                         self.ACCENT, 'white')
 
         copy_btn = tk.Button(inner, text='📋  Kopieren',
-            font=('Segoe UI', 9),
+            font=(FONT_FAMILY, 9),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
             relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
@@ -862,9 +958,9 @@ class AnnotationEditor:
         hdr = tk.Frame(strip_frame, bg=self.BG_STRIP)
         hdr.pack(side='left', fill='y', padx=(12, 4))
         tk.Label(hdr, text='🗂', bg=self.BG_STRIP, fg=self.ACCENT,
-                 font=('Segoe UI', 18)).pack(pady=(14, 0))
+                 font=(FONT_FAMILY, 18)).pack(pady=(14, 0))
         tk.Label(hdr, text='VERLAUF', bg=self.BG_STRIP, fg=self.FG_MUTED,
-                 font=('Segoe UI', 7, 'bold')).pack()
+                 font=(FONT_FAMILY, 7, 'bold')).pack()
 
         tk.Frame(strip_frame, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', pady=12, padx=(4, 0))
@@ -901,7 +997,7 @@ class AnnotationEditor:
             tk.Label(self._strip_inner,
                      text='Noch keine Screenshots vorhanden',
                      bg=self.BG_STRIP, fg=self.FG_MUTED,
-                     font=('Segoe UI', 9)).pack(padx=20, pady=20)
+                     font=(FONT_FAMILY, 9)).pack(padx=20, pady=20)
             return
         for entry in entries:
             self._add_thumb_widget(entry)
@@ -935,11 +1031,11 @@ class AnnotationEditor:
         ts = entry.get('timestamp_display', '')[-8:]
         time_lbl = tk.Label(card, text=ts, bg=self.BG_CELL,
                             fg=self.ACCENT if is_active else self.FG_MUTED,
-                            font=('Segoe UI', 7,
+                            font=(FONT_FAMILY, 7,
                                   'bold' if is_active else 'normal'))
         time_lbl.pack(pady=(1, 0))
 
-        del_btn = tk.Button(card, text='✕', font=('Segoe UI', 7),
+        del_btn = tk.Button(card, text='✕', font=(FONT_FAMILY, 7),
                             bg=self.BG_CELL, fg=self.FG_MUTED,
                             activebackground=self.DANGER,
                             activeforeground='white',
@@ -989,17 +1085,19 @@ class AnnotationEditor:
         row = tk.Frame(bar, bg=self.BG_TOOLBAR)
         row.pack(fill='x', padx=10, pady=4)
         self._status_dot = tk.Label(row, text='●', bg=self.BG_TOOLBAR,
-                                    fg=self.ACCENT, font=('Segoe UI', 8))
+                                    fg=self.ACCENT, font=(FONT_FAMILY, 8))
         self._status_dot.pack(side='left')
         tk.Label(row, textvariable=self._status_var, anchor='w',
                  bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=('Segoe UI', 8)).pack(side='left', padx=(4, 0))
+                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(4, 0))
 
     def _bind_shortcuts(self):
-        self.win.bind('<Control-z>', lambda e: self._undo())
-        self.win.bind('<Control-y>', lambda e: self._redo())
-        self.win.bind('<Control-s>', lambda e: self.save_to_file())
-        self.win.bind('<Control-c>', lambda e: self.copy_to_clipboard())
+        # macOS: Command statt Control
+        mod = 'Command' if IS_MACOS else 'Control'
+        self.win.bind(f'<{mod}-z>', lambda e: self._undo())
+        self.win.bind(f'<{mod}-y>', lambda e: self._redo())
+        self.win.bind(f'<{mod}-s>', lambda e: self.save_to_file())
+        self.win.bind(f'<{mod}-c>', lambda e: self.copy_to_clipboard())
         for i, (tool_id, _, _) in enumerate(self.TOOLS):
             self.win.bind(str(i + 1),
                           lambda e, t=tool_id: self._select_tool(t))
@@ -1206,7 +1304,7 @@ class AnnotationEditor:
         elif ann.kind == 'text':
             self.canvas.create_text(ann.x1, ann.y1,
                 text=ann.text, fill=c,
-                font=('Segoe UI', ann.font_size, 'bold'),
+                font=(FONT_FAMILY, ann.font_size, 'bold'),
                 anchor='nw', tag=tag)
         elif ann.kind == 'callout':
             mx = (ann.x1 + ann.x2) // 2
@@ -1217,7 +1315,7 @@ class AnnotationEditor:
                 fill='white', outline=c, width=w, tag=tag)
             self.canvas.create_text(ann.x1 + 6, ann.y1 + 6,
                 text=ann.text, fill=c,
-                font=('Segoe UI', ann.font_size), anchor='nw', tag=tag)
+                font=(FONT_FAMILY, ann.font_size), anchor='nw', tag=tag)
         elif ann.kind == 'highlight':
             self.canvas.create_rectangle(ann.x1, ann.y1, ann.x2, ann.y2,
                 fill=c, stipple='gray50', outline='', tag=tag)
@@ -1263,10 +1361,7 @@ class AnnotationEditor:
             draw.rectangle([(ann.x1, ann.y1), (ann.x2, ann.y2)],
                            outline=c, width=w)
         elif ann.kind == 'text':
-            try:
-                font = ImageFont.truetype('segoeui.ttf', ann.font_size)
-            except Exception:
-                font = ImageFont.load_default()
+            font = _get_truetype_font(ann.font_size)
             draw.text((ann.x1, ann.y1), ann.text, fill=c, font=font)
         elif ann.kind == 'callout':
             bg = (255, 255, 255, 230)
@@ -1275,10 +1370,7 @@ class AnnotationEditor:
             mx = (ann.x1 + ann.x2) // 2
             draw.polygon([(mx - 8, ann.y2), (mx + 8, ann.y2),
                           (ann.tail_x, ann.tail_y)], fill=bg, outline=c)
-            try:
-                font = ImageFont.truetype('segoeui.ttf', ann.font_size)
-            except Exception:
-                font = ImageFont.load_default()
+            font = _get_truetype_font(ann.font_size)
             draw.text((ann.x1 + 6, ann.y1 + 6), ann.text,
                       fill=c, font=font)
         elif ann.kind == 'highlight':
@@ -1324,6 +1416,18 @@ class AnnotationEditor:
 
     def copy_to_clipboard(self):
         img = self._composite_image()
+        if IS_WINDOWS:
+            self._clipboard_win(img)
+        elif IS_MACOS:
+            self._clipboard_mac(img)
+        else:
+            messagebox.showinfo(
+                'Zwischenablage',
+                'Clipboard wird auf dieser Plattform nicht unterstützt.\n'
+                'Bitte speichere das Bild als Datei.',
+                parent=self.win)
+
+    def _clipboard_win(self, img: Image.Image):
         try:
             import win32clipboard
             output = io.BytesIO()
@@ -1341,6 +1445,22 @@ class AnnotationEditor:
                 'pywin32 nicht verfügbar.\n'
                 'Bitte speichere das Bild als Datei.',
                 parent=self.win)
+
+    def _clipboard_mac(self, img: Image.Image):
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                tmp_path = f.name
+                img.save(f, 'PNG')
+            script = (
+                'set the clipboard to '
+                f'(read (POSIX file "{tmp_path}") as «class PNGf»)'
+            )
+            subprocess.run(['osascript', '-e', script],
+                           check=True, capture_output=True)
+            os.unlink(tmp_path)
+            self._status_var.set('In Zwischenablage kopiert')
+        except Exception as e:
+            self._status_var.set(f'Clipboard-Fehler: {e}')
 
     def _on_close(self):
         self.win.destroy()
@@ -1388,7 +1508,7 @@ class _ScrollingRegionOverlay:
         self.canvas.create_text(
             sw // 2, 30,
             text='Scroll-Bereich auswählen (sichtbares Fenster)  |  ESC = Abbrechen',
-            fill='#FFDD00', font=('Segoe UI', 13))
+            fill='#FFDD00', font=(FONT_FAMILY, 13))
 
         self.canvas.bind('<ButtonPress-1>',   self._on_down)
         self.canvas.bind('<B1-Motion>',        self._on_drag)
@@ -1431,7 +1551,7 @@ class _ScrollingRegionOverlay:
         self.canvas.create_text(
             x1 + 4, y1 - 18 if y1 > 20 else y2 + 4,
             text=lbl, fill='#FFDD00',
-            font=('Segoe UI', 10, 'bold'), anchor='nw', tag='sel')
+            font=(FONT_FAMILY, 10, 'bold'), anchor='nw', tag='sel')
 
 
 # ===========================================================================
@@ -1456,6 +1576,7 @@ class ScreenshotApp:
         self.root.title('Screenshot-Tool')
         self._capturing    = False
         self._active_editor = None
+        self._hotkey_listener = None
 
         self.engine  = CaptureEngine()
         self.history = HistoryManager()
@@ -1482,24 +1603,31 @@ class ScreenshotApp:
         logo_frame = tk.Frame(bar, bg=self.BG_TOP)
         logo_frame.pack(side='left', padx=(12, 8))
         tk.Label(logo_frame, text='📷', bg=self.BG_TOP, fg=self.ACCENT,
-                 font=('Segoe UI', 20)).pack(pady=(2, 0))
+                 font=(FONT_FAMILY, 20)).pack(pady=(2, 0))
         tk.Label(logo_frame, text='Screenshot', bg=self.BG_TOP,
-                 fg=self.FG_MUTED, font=('Segoe UI', 7, 'bold')).pack()
+                 fg=self.FG_MUTED, font=(FONT_FAMILY, 7, 'bold')).pack()
 
         tk.Frame(bar, bg=self.DIVIDER, width=1).pack(
             side='left', fill='y', pady=10, padx=(0, 6))
 
+        # Hotkey-Labels plattformabhängig
+        if IS_MACOS:
+            hotkeys = ['⌘⇧1', '⌘⇧F', '⌘⇧W', '⌘⇧S']
+        else:
+            hotkeys = ['Print Screen', 'Ctrl+Shift+F',
+                       'Ctrl+Shift+W', 'Ctrl+Shift+S']
+
         # Capture-Buttons
-        for icon, label, hotkey, cmd in [
-            ('✂',  'Region',    'Print Screen',  self.start_region),
-            ('🖥',  'Vollbild',  'Ctrl+Shift+F',  self.start_fullscreen),
-            ('🪟',  'Fenster',   'Ctrl+Shift+W',  self.start_window),
-            ('📜',  'Scrolling', 'Ctrl+Shift+S',  self.start_scrolling),
-        ]:
+        for (icon, label, _, cmd), hotkey in zip([
+            ('✂',  'Region',    '', self.start_region),
+            ('🖥',  'Vollbild',  '', self.start_fullscreen),
+            ('🪟',  'Fenster',   '', self.start_window),
+            ('📜',  'Scrolling', '', self.start_scrolling),
+        ], hotkeys):
             cell = tk.Frame(bar, bg=self.BG_TOP)
             cell.pack(side='left', padx=2, pady=6)
             btn = tk.Button(cell, text=f'{icon}  {label}',
-                            font=('Segoe UI', 10),
+                            font=(FONT_FAMILY, 10),
                             bg=self.BTN_NORM, fg=self.BTN_FG,
                             activebackground=self.ACCENT,
                             activeforeground='white',
@@ -1507,7 +1635,7 @@ class ScreenshotApp:
                             cursor='hand2', command=cmd)
             btn.pack()
             tk.Label(cell, text=hotkey, bg=self.BG_TOP, fg=self.FG_MUTED,
-                     font=('Segoe UI', 7)).pack()
+                     font=(FONT_FAMILY, 7)).pack()
             btn.bind('<Enter>',
                      lambda e, b=btn: b.config(bg=self.ACCENT, fg='white'))
             btn.bind('<Leave>',
@@ -1522,14 +1650,14 @@ class ScreenshotApp:
         status_row = tk.Frame(bar, bg=self.BG_TOP)
         status_row.pack(side='left', padx=6)
         tk.Label(status_row, text='●', bg=self.BG_TOP, fg=self.ACCENT,
-                 font=('Segoe UI', 7)).pack(side='left')
+                 font=(FONT_FAMILY, 7)).pack(side='left')
         tk.Label(status_row, textvariable=self._status_var,
                  bg=self.BG_TOP, fg=self.FG_MUTED,
-                 font=('Segoe UI', 8), width=18, anchor='w').pack(
+                 font=(FONT_FAMILY, 8), width=18, anchor='w').pack(
                      side='left', padx=(3, 0))
 
         # Schließen-Button
-        close_btn = tk.Button(bar, text='✕', font=('Segoe UI', 11),
+        close_btn = tk.Button(bar, text='✕', font=(FONT_FAMILY, 11),
                               bg=self.BG_TOP, fg=self.FG_MUTED,
                               activebackground='#DC2626',
                               activeforeground='white',
@@ -1548,6 +1676,12 @@ class ScreenshotApp:
     # ------------------------------------------------------------------
 
     def _register_hotkeys(self):
+        if IS_WINDOWS:
+            self._register_hotkeys_win()
+        elif IS_MACOS:
+            self._register_hotkeys_mac()
+
+    def _register_hotkeys_win(self):
         try:
             import keyboard as kb
             kb.add_hotkey('print_screen',
@@ -1558,6 +1692,22 @@ class ScreenshotApp:
                           lambda: self.root.after(0, self.start_window))
             kb.add_hotkey('ctrl+shift+s',
                           lambda: self.root.after(0, self.start_scrolling))
+        except Exception as e:
+            self._set_status(f'Hotkeys nicht verfügbar: {e}')
+
+    def _register_hotkeys_mac(self):
+        try:
+            from pynput import keyboard as pynput_kb
+
+            hotkeys = {
+                '<cmd>+<shift>+1': lambda: self.root.after(0, self.start_region),
+                '<cmd>+<shift>+f': lambda: self.root.after(0, self.start_fullscreen),
+                '<cmd>+<shift>+w': lambda: self.root.after(0, self.start_window),
+                '<cmd>+<shift>+s': lambda: self.root.after(0, self.start_scrolling),
+            }
+            self._hotkey_listener = pynput_kb.GlobalHotKeys(hotkeys)
+            self._hotkey_listener.daemon = True
+            self._hotkey_listener.start()
         except Exception as e:
             self._set_status(f'Hotkeys nicht verfügbar: {e}')
 
@@ -1600,14 +1750,14 @@ class ScreenshotApp:
         if result is None:
             self._capturing = False
             return
-        hwnd, title = result
+        wid, title = result
         self._set_status(f'Fenster wird aufgenommen: {title}')
         self.root.withdraw()
-        self.root.after(300, lambda: self._do_window(hwnd))
+        self.root.after(300, lambda: self._do_window(wid))
 
-    def _do_window(self, hwnd):
+    def _do_window(self, wid):
         try:
-            self._on_captured(self.engine.capture_window(hwnd))
+            self._on_captured(self.engine.capture_window(wid))
         except Exception as e:
             self._capturing = False
             self._show_error(f'Fenster-Fehler: {e}')
