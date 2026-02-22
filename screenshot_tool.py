@@ -642,21 +642,25 @@ class CaptureEngine:
 
 # ── Gemeinsame UI-Farben ──────────────────────────────────────────────────
 class _Theme:
-    BG_MAIN      = '#F5F7FA'
+    BG_MAIN      = '#F8FAFC'
     BG_TOOLBAR   = '#FFFFFF'
-    BG_CANVAS    = '#C8CDD5'
-    FG_MAIN      = '#1E293B'
-    FG_MUTED     = '#94A3B8'
-    ACCENT       = '#0078D4'
-    ACCENT_HOV   = '#006ABE'
-    ACCENT_LIGHT = '#EBF3FB'
-    BTN_SEL      = '#0078D4'
-    BTN_NORM     = '#F0F2F5'
-    BTN_HOV      = '#E4E8EF'
+    BG_CANVAS    = '#CBD5E1'
+    FG_MAIN      = '#0F172A'
+    FG_MUTED     = '#64748B'
+    ACCENT       = '#2563EB'
+    ACCENT_HOV   = '#1D4ED8'
+    ACCENT_LIGHT = '#EFF6FF'
+    BTN_SEL      = '#2563EB'
+    BTN_NORM     = '#F1F5F9'
+    BTN_HOV      = '#E2E8F0'
     BTN_FG       = '#334155'
     DIVIDER      = '#E2E8F0'
     DANGER       = '#DC2626'
     DANGER_HOV   = '#B91C1C'
+    SUCCESS      = '#16A34A'
+    EXPORT_BG    = '#1E293B'
+    EXPORT_BTN   = '#334155'
+    EXPORT_HOV   = '#475569'
 
 
 @dataclass
@@ -696,8 +700,11 @@ class AnnotationEditor(_Theme):
     ]
 
     # Zusätzliche Farben (nur Editor)
-    BG_STRIP     = '#F5F7FA'
+    BG_STRIP     = '#F8FAFC'
     BG_CELL      = '#FFFFFF'
+
+    _CONFIG_PATH = os.path.join(os.path.expanduser('~'),
+                                '.screenshot_tool_config.json')
 
     def __init__(self, parent: tk.Tk, image: Image.Image, app,
                  history: HistoryManager | None = None):
@@ -705,6 +712,8 @@ class AnnotationEditor(_Theme):
         self.image   = image.copy()
         self.app     = app
         self.history = history or HistoryManager()
+
+        self._settings = self._load_settings()
 
         self.annotations: list[Annotation] = []
         # Undo/Redo: list of (annotations_copy, image_or_None)
@@ -758,6 +767,58 @@ class AnnotationEditor(_Theme):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Einstellungen (persistent)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _load_settings(cls) -> dict:
+        defaults = {
+            'quick_save_dir': os.path.join(os.path.expanduser('~'), 'Desktop'),
+        }
+        try:
+            with open(cls._CONFIG_PATH, 'r') as f:
+                stored = json.load(f)
+            defaults.update(stored)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        # Validierung: Ordner muss existieren
+        if not os.path.isdir(defaults['quick_save_dir']):
+            defaults['quick_save_dir'] = os.path.expanduser('~')
+        return defaults
+
+    def _save_settings(self):
+        try:
+            with open(self._CONFIG_PATH, 'w') as f:
+                json.dump(self._settings, f, indent=2)
+        except OSError:
+            pass
+
+    def _change_save_dir(self):
+        """Lässt den Nutzer den Quick-Save-Ordner auswählen."""
+        new_dir = filedialog.askdirectory(
+            parent=self.win,
+            initialdir=self._settings['quick_save_dir'],
+            title='Schnell-Export Zielordner wählen')
+        if new_dir:
+            self._settings['quick_save_dir'] = new_dir
+            self._save_settings()
+            # Label in Export-Bar aktualisieren
+            short = self._short_path(new_dir)
+            self._save_dir_label.config(text=f'📂 {short}')
+            self._show_toast(f'Zielordner: {short}')
+
+    @staticmethod
+    def _short_path(path: str, max_len: int = 30) -> str:
+        """Kürzt einen Pfad für die Anzeige."""
+        home = os.path.expanduser('~')
+        if path.startswith(home):
+            path = '~' + path[len(home):]
+        if len(path) <= max_len:
+            return path
+        parts = path.split(os.sep)
+        return os.sep.join([parts[0], '…', parts[-1]])
+
     def show(self, entry_id: str | None = None):
         self._current_entry_id = entry_id
         self.win = tk.Toplevel(self.parent)
@@ -806,17 +867,27 @@ class AnnotationEditor(_Theme):
 
     def _add_tooltip(self, widget: tk.Widget, text: str):
         tip_win = [None]
+        delay_id = [None]
+
         def show(e):
-            tw = tk.Toplevel(widget)
-            tw.wm_overrideredirect(True)
-            tw.wm_geometry(f'+{e.x_root + 12}+{e.y_root + 20}')
-            tk.Label(tw, text=text, bg='#1E293B', fg='white',
-                     font=(FONT_FAMILY, 8), padx=6, pady=2).pack()
-            tip_win[0] = tw
+            def _create():
+                tw = tk.Toplevel(widget)
+                tw.wm_overrideredirect(True)
+                tw.wm_geometry(f'+{e.x_root + 8}+{e.y_root + 24}')
+                tw.attributes('-alpha', 0.92)
+                tk.Label(tw, text=text, bg='#0F172A', fg='#E2E8F0',
+                         font=(FONT_FAMILY, 9), padx=8, pady=4).pack()
+                tip_win[0] = tw
+            delay_id[0] = widget.after(400, _create)
+
         def hide(e):
+            if delay_id[0]:
+                widget.after_cancel(delay_id[0])
+                delay_id[0] = None
             if tip_win[0]:
                 tip_win[0].destroy()
                 tip_win[0] = None
+
         widget.bind('<Enter>', show, add='+')
         widget.bind('<Leave>', hide, add='+')
 
@@ -855,111 +926,105 @@ class AnnotationEditor(_Theme):
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
     def _build_toolbar(self):
-        self.toolbar = tk.Frame(self.win, bg=self.BG_TOOLBAR,
-                                relief='flat', bd=0,
-                                highlightthickness=1,
-                                highlightbackground=self.DIVIDER)
-        self.toolbar.pack(side='top', fill='x')
-        inner = tk.Frame(self.toolbar, bg=self.BG_TOOLBAR)
-        inner.pack(fill='x', padx=4, pady=3)
+        # Toolbar-Wrapper mit feinem Schatten-Divider
+        toolbar_wrap = tk.Frame(self.win, bg=self.BG_TOOLBAR)
+        toolbar_wrap.pack(side='top', fill='x')
+        self.toolbar = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
+        self.toolbar.pack(fill='x', padx=8, pady=6)
+        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
+            side='bottom', fill='x')
 
-        # Werkzeug-Buttons (nur Symbol, Tooltip zeigt Name)
+        inner = self.toolbar
+
+        # ── Werkzeuge ─────────────────────────────────────────────────
         self._tool_buttons: dict[str, tk.Button] = {}
         for tool_id, symbol, label in self.TOOLS:
             btn = tk.Button(
                 inner, text=symbol,
-                font=(FONT_FAMILY, 12),
+                font=(FONT_FAMILY, 13),
                 bg=self.BTN_NORM, fg=self.BTN_FG,
                 activebackground=self.ACCENT, activeforeground='white',
-                relief='flat', padx=6, pady=3, bd=0, cursor='hand2',
+                relief='flat', width=3, pady=4, bd=0, cursor='hand2',
                 command=lambda t=tool_id: self._select_tool(t))
             btn.pack(side='left', padx=1)
             self._tool_buttons[tool_id] = btn
             self._add_tool_hover(btn, tool_id)
             self._add_tooltip(btn, label)
 
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='left', fill='y', padx=8, pady=2)
+        self._toolbar_sep(inner)
 
-        # Farb-Swatch
-        tk.Label(inner, text='Farbe', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 4))
+        # ── Farb-Swatch ──────────────────────────────────────────────
         self._color_swatch = tk.Frame(
-            inner, bg=self.tool_color, width=24, height=24,
+            inner, bg=self.tool_color, width=26, height=26,
             highlightthickness=2, highlightbackground=self.DIVIDER,
             cursor='hand2')
-        self._color_swatch.pack(side='left', padx=(0, 8))
+        self._color_swatch.pack(side='left', padx=(4, 0))
         self._color_swatch.pack_propagate(False)
         self._color_swatch.bind('<Button-1>', lambda e: self._pick_color())
         self._color_swatch.bind('<Enter>',
             lambda e: self._color_swatch.config(highlightbackground=self.ACCENT))
         self._color_swatch.bind('<Leave>',
             lambda e: self._color_swatch.config(highlightbackground=self.DIVIDER))
+        self._add_tooltip(self._color_swatch, 'Farbe wählen')
 
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='left', fill='y', padx=8, pady=2)
+        self._toolbar_sep(inner)
 
-        # Strichbreite
-        tk.Label(inner, text='Breite', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
-        self._width_var = tk.IntVar(value=self.tool_width)
-        tk.Spinbox(inner, from_=1, to=20, textvariable=self._width_var,
-                   width=3, font=(FONT_FAMILY, 9), relief='flat',
-                   bg=self.BTN_NORM, fg=self.FG_MAIN,
-                   buttonbackground=self.BTN_NORM,
-                   command=self._update_width).pack(side='left', padx=(0, 8))
+        # ── Strichbreite / Schrift / Blur — kompakt mit Spinbox ──────
+        for label_text, var_name, default, lo, hi, cmd, attr in [
+            ('Breite',  '_width_var', self.tool_width,  1, 20, '_update_width',  None),
+            ('Schrift', '_font_var',  self.font_size,   8, 72, '_update_font',   None),
+            ('Blur',    '_blur_var',  self.blur_radius,  1, 50, '_update_blur',   None),
+        ]:
+            tk.Label(inner, text=label_text, bg=self.BG_TOOLBAR,
+                     fg=self.FG_MUTED, font=(FONT_FAMILY, 8)
+                     ).pack(side='left', padx=(0, 2))
+            var = tk.IntVar(value=default)
+            setattr(self, var_name, var)
+            tk.Spinbox(inner, from_=lo, to=hi, textvariable=var,
+                       width=3, font=(FONT_FAMILY, 9), relief='flat',
+                       bg=self.BTN_NORM, fg=self.FG_MAIN,
+                       buttonbackground=self.BTN_NORM,
+                       command=getattr(self, cmd)
+                       ).pack(side='left', padx=(0, 6))
 
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='left', fill='y', padx=8, pady=2)
+        self._toolbar_sep(inner)
 
-        # Schriftgröße
-        tk.Label(inner, text='Schrift', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
-        self._font_var = tk.IntVar(value=self.font_size)
-        tk.Spinbox(inner, from_=8, to=72, textvariable=self._font_var,
-                   width=3, font=(FONT_FAMILY, 9), relief='flat',
-                   bg=self.BTN_NORM, fg=self.FG_MAIN,
-                   buttonbackground=self.BTN_NORM,
-                   command=self._update_font).pack(side='left')
-
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='left', fill='y', padx=8, pady=2)
-
-        # Blur-Stärke
-        tk.Label(inner, text='Blur', bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
-                 font=(FONT_FAMILY, 8)).pack(side='left', padx=(0, 3))
-        self._blur_var = tk.IntVar(value=self.blur_radius)
-        tk.Spinbox(inner, from_=1, to=50, textvariable=self._blur_var,
-                   width=3, font=(FONT_FAMILY, 9), relief='flat',
-                   bg=self.BTN_NORM, fg=self.FG_MAIN,
-                   buttonbackground=self.BTN_NORM,
-                   command=self._update_blur).pack(side='left')
-
-        # ── Undo / Redo – Mitte ───────────────────────────────────────
-        tk.Frame(inner, bg=self.DIVIDER, width=1).pack(
-            side='left', fill='y', padx=8, pady=2)
-
-        self._undo_btn = tk.Button(inner, text='↩  Zurück',
-            font=(FONT_FAMILY, 9),
+        # ── Undo / Redo ──────────────────────────────────────────────
+        self._undo_btn = tk.Button(inner, text='↩',
+            font=(FONT_FAMILY, 13),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
-            relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
+            relief='flat', width=3, pady=4, bd=0, cursor='hand2',
             command=self._undo, state='disabled')
         self._undo_btn.pack(side='left', padx=1)
         self._add_hover(self._undo_btn, self.BTN_HOV, self.FG_MAIN,
                         self.BTN_NORM, self.BTN_FG)
+        self._add_tooltip(self._undo_btn, 'Rückgängig')
 
-        self._redo_btn = tk.Button(inner, text='↪  Vor',
-            font=(FONT_FAMILY, 9),
+        self._redo_btn = tk.Button(inner, text='↪',
+            font=(FONT_FAMILY, 13),
             bg=self.BTN_NORM, fg=self.BTN_FG,
             activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
-            relief='flat', padx=10, pady=5, bd=0, cursor='hand2',
+            relief='flat', width=3, pady=4, bd=0, cursor='hand2',
             command=self._redo, state='disabled')
         self._redo_btn.pack(side='left', padx=1)
         self._add_hover(self._redo_btn, self.BTN_HOV, self.FG_MAIN,
                         self.BTN_NORM, self.BTN_FG)
+        self._add_tooltip(self._redo_btn, 'Wiederherstellen')
+
+        # ── Bildgröße-Anzeige (rechts) ──────────────────────────────
+        iw, ih = self.image.size
+        self._size_label = tk.Label(
+            inner, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
+            fg=self.FG_MUTED, font=(FONT_FAMILY, 8))
+        self._size_label.pack(side='right', padx=(0, 4))
 
         self._select_tool('arrow')
+
+    @staticmethod
+    def _toolbar_sep(parent):
+        tk.Frame(parent, bg='#CBD5E1', width=1).pack(
+            side='left', fill='y', padx=8, pady=4)
 
     def _build_canvas(self):
         frame = tk.Frame(self.win, bg=self.BG_MAIN)
@@ -1127,63 +1192,87 @@ class AnnotationEditor(_Theme):
 
     def _build_statusbar(self):
         self._status_var = tk.StringVar(value='Bereit')
-        bar = tk.Frame(self.win, bg=self.BG_TOOLBAR)
+        SBG = '#F1F5F9'
+        bar = tk.Frame(self.win, bg=SBG)
         bar.pack(side='bottom', fill='x')
-        row = tk.Frame(bar, bg=self.BG_TOOLBAR)
-        row.pack(fill='x', padx=10, pady=4)
-        self._status_dot = tk.Label(row, text='●', bg=self.BG_TOOLBAR,
-                                    fg=self.ACCENT, font=(FONT_FAMILY, 8))
+        tk.Frame(self.win, bg=self.DIVIDER, height=1).pack(
+            side='bottom', fill='x')
+        row = tk.Frame(bar, bg=SBG)
+        row.pack(fill='x', padx=12, pady=3)
+        self._status_dot = tk.Label(row, text='●', bg=SBG,
+                                    fg=self.SUCCESS, font=(FONT_FAMILY, 6))
         self._status_dot.pack(side='left')
         tk.Label(row, textvariable=self._status_var, anchor='w',
-                 bg=self.BG_TOOLBAR, fg=self.FG_MUTED,
+                 bg=SBG, fg=self.FG_MUTED,
                  font=(FONT_FAMILY, 8)).pack(side='left', padx=(4, 0))
 
     def _build_export_bar(self):
-        """Prominente Export-Leiste unter dem Canvas."""
-        tk.Frame(self.win, bg=self.DIVIDER, height=1).pack(
-            side='bottom', fill='x')
+        """Dark-Theme Export-Leiste – professionelles Erscheinungsbild."""
+        EBG   = self.EXPORT_BG     # Dark bar background
+        EBTN  = self.EXPORT_BTN    # Button background
+        EHOV  = self.EXPORT_HOV    # Button hover
+        EFG   = '#E2E8F0'          # Button text
+        EMUT  = '#94A3B8'          # Muted text
 
-        bar = tk.Frame(self.win, bg=self.BG_TOOLBAR, height=44)
+        bar = tk.Frame(self.win, bg=EBG, height=50)
         bar.pack(side='bottom', fill='x')
         bar.pack_propagate(False)
 
-        inner = tk.Frame(bar, bg=self.BG_TOOLBAR)
-        inner.pack(fill='both', expand=True, padx=8, pady=6)
+        inner = tk.Frame(bar, bg=EBG)
+        inner.pack(fill='both', expand=True, padx=12, pady=8)
 
-        # Label links
-        tk.Label(inner, text='EXPORT', bg=self.BG_TOOLBAR,
-                 fg=self.FG_MUTED, font=(FONT_FAMILY, 8, 'bold')
-                 ).pack(side='left', padx=(4, 12))
+        # ── Linke Seite: Clipboard + Quick-Export ─────────────────────
+        tk.Label(inner, text='EXPORT', bg=EBG, fg=EMUT,
+                 font=(FONT_FAMILY, 7, 'bold')).pack(side='left',
+                                                      padx=(0, 10))
 
-        # Quick-Export-Buttons
-        export_actions = [
-            ('📋  In Zwischenablage',  self.copy_to_clipboard,
-             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
-            ('💾  Als PNG speichern',  lambda: self._quick_save('png'),
-             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
-            ('🖼  Als JPG speichern',  lambda: self._quick_save('jpg'),
-             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
-            ('📄  Als PDF speichern',  lambda: self._quick_save('pdf'),
-             self.BTN_NORM, self.BTN_FG, self.BTN_HOV, self.FG_MAIN),
-        ]
-        for text, cmd, bg, fg, hover_bg, hover_fg in export_actions:
-            btn = tk.Button(inner, text=text, font=(FONT_FAMILY, 9),
-                            bg=bg, fg=fg, activebackground=hover_bg,
-                            activeforeground=hover_fg, relief='flat',
-                            padx=10, pady=3, bd=0, cursor='hand2',
-                            command=cmd)
-            btn.pack(side='left', padx=3)
-            self._add_hover(btn, hover_bg, hover_fg, bg, fg)
+        clip_btn = tk.Button(inner, text='📋 Clipboard',
+                             font=(FONT_FAMILY, 9),
+                             bg=EBTN, fg=EFG,
+                             activebackground=EHOV, activeforeground='white',
+                             relief='flat', padx=10, pady=4, bd=0,
+                             cursor='hand2', command=self.copy_to_clipboard)
+        clip_btn.pack(side='left', padx=(0, 3))
+        self._add_hover(clip_btn, EHOV, 'white', EBTN, EFG)
 
-        # Speichern unter … (Akzent-Button rechts)
-        save_as = tk.Button(inner, text='💾  Speichern unter …',
-                            font=(FONT_FAMILY, 9, 'bold'),
+        tk.Frame(inner, bg='#475569', width=1).pack(
+            side='left', fill='y', padx=8, pady=2)
+
+        for fmt, label in [('png', 'PNG'), ('jpg', 'JPG'), ('pdf', 'PDF')]:
+            btn = tk.Button(inner, text=label, font=(FONT_FAMILY, 9, 'bold'),
+                            bg=EBTN, fg=EFG,
+                            activebackground=EHOV, activeforeground='white',
+                            relief='flat', padx=12, pady=4, bd=0,
+                            cursor='hand2',
+                            command=lambda f=fmt: self._quick_save(f))
+            btn.pack(side='left', padx=2)
+            self._add_hover(btn, EHOV, 'white', EBTN, EFG)
+
+        # ── Mitte: Zielordner-Anzeige + Ändern ───────────────────────
+        tk.Frame(inner, bg='#475569', width=1).pack(
+            side='left', fill='y', padx=8, pady=2)
+
+        short = self._short_path(self._settings['quick_save_dir'])
+        self._save_dir_label = tk.Label(
+            inner, text=f'📂 {short}', bg=EBG, fg=EMUT,
+            font=(FONT_FAMILY, 8), cursor='hand2')
+        self._save_dir_label.pack(side='left', padx=(0, 4))
+        self._save_dir_label.bind('<Button-1>',
+                                  lambda e: self._change_save_dir())
+        self._save_dir_label.bind('<Enter>',
+            lambda e: self._save_dir_label.config(fg='white'))
+        self._save_dir_label.bind('<Leave>',
+            lambda e: self._save_dir_label.config(fg=EMUT))
+
+        # ── Rechte Seite: Speichern unter … (Akzent) ─────────────────
+        save_as = tk.Button(inner, text='Speichern unter …',
+                            font=(FONT_FAMILY, 10, 'bold'),
                             bg=self.ACCENT, fg='white',
                             activebackground=self.ACCENT_HOV,
                             activeforeground='white',
-                            relief='flat', padx=14, pady=3, bd=0,
+                            relief='flat', padx=16, pady=4, bd=0,
                             cursor='hand2', command=self.save_to_file)
-        save_as.pack(side='right', padx=(8, 4))
+        save_as.pack(side='right', padx=(8, 0))
         self._add_hover(save_as, self.ACCENT_HOV, 'white',
                         self.ACCENT, 'white')
 
@@ -1704,22 +1793,47 @@ class AnnotationEditor(_Theme):
         else:
             img.save(path)
 
+    def _show_toast(self, message: str, is_error: bool = False):
+        """Zeigt ein modernes Toast-Banner mittig über dem Canvas."""
+        bg = self.DANGER if is_error else '#0F172A'
+        toast = tk.Frame(self.win, bg=bg, padx=20, pady=10,
+                         highlightthickness=1,
+                         highlightbackground='#475569' if not is_error
+                                             else self.DANGER_HOV)
+        lbl = tk.Label(toast, text=message, bg=bg, fg='white',
+                       font=(FONT_FAMILY, 11, 'bold'))
+        lbl.pack()
+        toast.place(relx=0.5, rely=0.0, anchor='n', y=12)
+        toast.lift()
+
+        def remove():
+            try:
+                toast.destroy()
+            except tk.TclError:
+                pass
+
+        self.win.after(2200, remove)
+
     def _quick_save(self, fmt: str):
-        """Schnell-Export als PNG/JPG/PDF auf den Desktop."""
-        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-        if not os.path.isdir(desktop):
-            desktop = os.path.expanduser('~')
+        """Schnell-Export in den konfigurierten Zielordner."""
+        save_dir = self._settings.get('quick_save_dir',
+                                       os.path.expanduser('~/Desktop'))
+        if not os.path.isdir(save_dir):
+            save_dir = os.path.expanduser('~')
         filename = f'screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{fmt}'
-        path = os.path.join(desktop, filename)
+        path = os.path.join(save_dir, filename)
 
         self._status_var.set('Wird gespeichert …')
         self.win.config(cursor='watch')
         self.win.update_idletasks()
         try:
             self._save_image_to_path(self._composite_image(), path)
-            self._status_var.set(f'✓ {filename} (Desktop)')
+            short = self._short_path(save_dir)
+            self._status_var.set(f'✓ {filename} ({short})')
+            self._show_toast(f'✓  {filename}  →  {short}')
         except Exception as e:
             self._status_var.set(f'Fehler: {e}')
+            self._show_toast(f'Fehler: {e}', is_error=True)
         finally:
             self.win.config(cursor='')
 
@@ -1738,9 +1852,12 @@ class AnnotationEditor(_Theme):
         self.win.update_idletasks()
         try:
             self._save_image_to_path(self._composite_image(), path)
-            self._status_var.set(f'✓ Gespeichert: {os.path.basename(path)}')
+            name = os.path.basename(path)
+            self._status_var.set(f'✓ Gespeichert: {name}')
+            self._show_toast(f'✓  {name}')
         except Exception as e:
             self._status_var.set(f'Fehler: {e}')
+            self._show_toast(f'Fehler: {e}', is_error=True)
         finally:
             self.win.config(cursor='')
 
@@ -1776,8 +1893,10 @@ class AnnotationEditor(_Theme):
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
             self._status_var.set('In Zwischenablage kopiert')
+            self._show_toast('✓  In Zwischenablage kopiert')
         except Exception as e:
             self._status_var.set(f'Clipboard-Fehler: {e}')
+            self._show_toast(f'Clipboard-Fehler: {e}', is_error=True)
         finally:
             try:
                 win32clipboard.CloseClipboard()
@@ -1798,8 +1917,10 @@ class AnnotationEditor(_Theme):
                            check=True, capture_output=True)
             os.unlink(tmp_path)
             self._status_var.set('In Zwischenablage kopiert')
+            self._show_toast('✓  In Zwischenablage kopiert')
         except Exception as e:
             self._status_var.set(f'Clipboard-Fehler: {e}')
+            self._show_toast(f'Clipboard-Fehler: {e}', is_error=True)
 
     # ------------------------------------------------------------------
     # Bild-Operationen: Resize, Watermark, Shadow, Border
@@ -1827,6 +1948,10 @@ class AnnotationEditor(_Theme):
         self._redraw_canvas()
         self._update_undo_redo_state()
         self._status_var.set(status_msg)
+        # Bildgröße-Label aktualisieren
+        if hasattr(self, '_size_label'):
+            iw, ih = self.image.size
+            self._size_label.config(text=f'{iw} × {ih} px')
 
     def _resize_image(self):
         """Bild-Größe ändern über Dialog."""
