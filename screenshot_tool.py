@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 import time
 import tkinter as tk
-from tkinter import filedialog, simpledialog, colorchooser, messagebox
+from tkinter import ttk, filedialog, simpledialog, colorchooser, messagebox
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -831,6 +831,7 @@ class AnnotationEditor(_Theme):
         win_h  = min(ih + 230, int(sh * 0.92))
         self.win.geometry(f'{win_w}x{win_h}')
 
+        self._setup_styles()
         self._build_menu()
         self._build_statusbar()   # side='bottom' → zuerst packen
         self._build_filmstrip()   # side='bottom' → vor Canvas packen!
@@ -840,6 +841,88 @@ class AnnotationEditor(_Theme):
         self._bind_shortcuts()
         self._redraw_canvas()
         self.win.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _setup_styles(self):
+        """Konfiguriert alle ttk-Styles für ein modernes Erscheinungsbild."""
+        self._style = ttk.Style(self.win)
+        self._style.theme_use('clam')
+
+        # ── Werkzeug-Buttons (Toolbar) ────────────────────────────────
+        self._style.configure('Tool.TButton',
+            font=(FONT_FAMILY, 14),
+            padding=(8, 6),
+            relief='flat',
+            background=self.BTN_NORM,
+            foreground=self.BTN_FG,
+            borderwidth=0)
+        self._style.map('Tool.TButton',
+            background=[('active', self.ACCENT_LIGHT),
+                        ('pressed', self.ACCENT)],
+            foreground=[('active', self.ACCENT),
+                        ('pressed', 'white')])
+
+        # Werkzeug selektiert
+        self._style.configure('ToolSel.TButton',
+            font=(FONT_FAMILY, 14),
+            padding=(8, 6),
+            relief='flat',
+            background=self.ACCENT,
+            foreground='white',
+            borderwidth=0)
+        self._style.map('ToolSel.TButton',
+            background=[('active', self.ACCENT_HOV),
+                        ('pressed', self.ACCENT_HOV)])
+
+        # ── Undo/Redo ────────────────────────────────────────────────
+        self._style.configure('UndoRedo.TButton',
+            font=(FONT_FAMILY, 13),
+            padding=(10, 6),
+            relief='flat',
+            background=self.BTN_NORM,
+            foreground=self.BTN_FG,
+            borderwidth=0)
+        self._style.map('UndoRedo.TButton',
+            background=[('active', self.BTN_HOV),
+                        ('disabled', self.BTN_NORM)],
+            foreground=[('disabled', self.DIVIDER)])
+
+        # ── Export-Bar: dunkle Buttons ────────────────────────────────
+        self._style.configure('Export.TButton',
+            font=(FONT_FAMILY, 10, 'bold'),
+            padding=(14, 7),
+            relief='flat',
+            background=self.EXPORT_BTN,
+            foreground='#E2E8F0',
+            borderwidth=0)
+        self._style.map('Export.TButton',
+            background=[('active', self.EXPORT_HOV),
+                        ('pressed', '#64748B')],
+            foreground=[('active', 'white'),
+                        ('pressed', 'white')])
+
+        # Clipboard-Button (etwas anders)
+        self._style.configure('ExportClip.TButton',
+            font=(FONT_FAMILY, 10),
+            padding=(12, 7),
+            relief='flat',
+            background=self.EXPORT_BTN,
+            foreground='#CBD5E1',
+            borderwidth=0)
+        self._style.map('ExportClip.TButton',
+            background=[('active', self.EXPORT_HOV)],
+            foreground=[('active', 'white')])
+
+        # Speichern-unter (Akzent)
+        self._style.configure('SaveAs.TButton',
+            font=(FONT_FAMILY, 11, 'bold'),
+            padding=(18, 8),
+            relief='flat',
+            background=self.ACCENT,
+            foreground='white',
+            borderwidth=0)
+        self._style.map('SaveAs.TButton',
+            background=[('active', self.ACCENT_HOV),
+                        ('pressed', '#1E40AF')])
 
     # ------------------------------------------------------------------
     # Hover-Hilfsmethoden
@@ -853,17 +936,10 @@ class AnnotationEditor(_Theme):
         widget.bind('<Leave>',
                     lambda e: widget.config(bg=normal_bg, fg=normal_fg))
 
-    def _add_tool_hover(self, btn: tk.Button, tool_id: str):
-        def on_enter(e):
-            if self.active_tool != tool_id:
-                btn.config(bg=self.ACCENT_LIGHT, fg=self.ACCENT)
-        def on_leave(e):
-            if self.active_tool == tool_id:
-                btn.config(bg=self.BTN_SEL, fg='white')
-            else:
-                btn.config(bg=self.BTN_NORM, fg=self.BTN_FG)
-        btn.bind('<Enter>', on_enter)
-        btn.bind('<Leave>', on_leave)
+    def _add_tool_hover(self, btn, tool_id: str):
+        """Hover für ttk Tool-Buttons (nicht mehr benötigt, ttk macht
+        Hover über style.map automatisch)."""
+        pass
 
     def _add_tooltip(self, widget: tk.Widget, text: str):
         tip_win = [None]
@@ -926,97 +1002,87 @@ class AnnotationEditor(_Theme):
         self.win.config(menu=mb, bg=self.BG_MAIN)
 
     def _build_toolbar(self):
-        # Toolbar-Wrapper mit feinem Schatten-Divider
         toolbar_wrap = tk.Frame(self.win, bg=self.BG_TOOLBAR)
         toolbar_wrap.pack(side='top', fill='x')
-        self.toolbar = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
-        self.toolbar.pack(fill='x', padx=8, pady=6)
+        inner = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
+        inner.pack(fill='x', padx=10, pady=7)
         tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
             side='bottom', fill='x')
 
-        inner = self.toolbar
-
         # ── Werkzeuge ─────────────────────────────────────────────────
-        self._tool_buttons: dict[str, tk.Button] = {}
+        self._tool_buttons: dict[str, ttk.Button] = {}
         for tool_id, symbol, label in self.TOOLS:
-            btn = tk.Button(
-                inner, text=symbol,
-                font=(FONT_FAMILY, 13),
-                bg=self.BTN_NORM, fg=self.BTN_FG,
-                activebackground=self.ACCENT, activeforeground='white',
-                relief='flat', width=3, pady=4, bd=0, cursor='hand2',
-                command=lambda t=tool_id: self._select_tool(t))
+            btn = ttk.Button(inner, text=symbol, style='Tool.TButton',
+                             command=lambda t=tool_id: self._select_tool(t),
+                             cursor='hand2')
             btn.pack(side='left', padx=1)
             self._tool_buttons[tool_id] = btn
-            self._add_tool_hover(btn, tool_id)
             self._add_tooltip(btn, label)
 
         self._toolbar_sep(inner)
 
         # ── Farb-Swatch ──────────────────────────────────────────────
+        swatch_frame = tk.Frame(inner, bg=self.BG_TOOLBAR)
+        swatch_frame.pack(side='left', padx=4)
+        tk.Label(swatch_frame, text='Farbe', bg=self.BG_TOOLBAR,
+                 fg=self.FG_MUTED, font=(FONT_FAMILY, 7)
+                 ).pack(side='top')
         self._color_swatch = tk.Frame(
-            inner, bg=self.tool_color, width=26, height=26,
+            swatch_frame, bg=self.tool_color, width=28, height=20,
             highlightthickness=2, highlightbackground=self.DIVIDER,
             cursor='hand2')
-        self._color_swatch.pack(side='left', padx=(4, 0))
+        self._color_swatch.pack(side='top')
         self._color_swatch.pack_propagate(False)
         self._color_swatch.bind('<Button-1>', lambda e: self._pick_color())
         self._color_swatch.bind('<Enter>',
-            lambda e: self._color_swatch.config(highlightbackground=self.ACCENT))
+            lambda e: self._color_swatch.config(
+                highlightbackground=self.ACCENT))
         self._color_swatch.bind('<Leave>',
-            lambda e: self._color_swatch.config(highlightbackground=self.DIVIDER))
-        self._add_tooltip(self._color_swatch, 'Farbe wählen')
+            lambda e: self._color_swatch.config(
+                highlightbackground=self.DIVIDER))
 
         self._toolbar_sep(inner)
 
-        # ── Strichbreite / Schrift / Blur — kompakt mit Spinbox ──────
-        for label_text, var_name, default, lo, hi, cmd, attr in [
-            ('Breite',  '_width_var', self.tool_width,  1, 20, '_update_width',  None),
-            ('Schrift', '_font_var',  self.font_size,   8, 72, '_update_font',   None),
-            ('Blur',    '_blur_var',  self.blur_radius,  1, 50, '_update_blur',   None),
+        # ── Strichbreite / Schrift / Blur ─────────────────────────────
+        for label_text, var_name, default, lo, hi, cmd in [
+            ('Breite',  '_width_var', self.tool_width,  1, 20, '_update_width'),
+            ('Schrift', '_font_var',  self.font_size,   8, 72, '_update_font'),
+            ('Blur',    '_blur_var',  self.blur_radius,  1, 50, '_update_blur'),
         ]:
-            tk.Label(inner, text=label_text, bg=self.BG_TOOLBAR,
-                     fg=self.FG_MUTED, font=(FONT_FAMILY, 8)
-                     ).pack(side='left', padx=(0, 2))
+            grp = tk.Frame(inner, bg=self.BG_TOOLBAR)
+            grp.pack(side='left', padx=2)
+            tk.Label(grp, text=label_text, bg=self.BG_TOOLBAR,
+                     fg=self.FG_MUTED, font=(FONT_FAMILY, 7)
+                     ).pack(side='top')
             var = tk.IntVar(value=default)
             setattr(self, var_name, var)
-            tk.Spinbox(inner, from_=lo, to=hi, textvariable=var,
+            tk.Spinbox(grp, from_=lo, to=hi, textvariable=var,
                        width=3, font=(FONT_FAMILY, 9), relief='flat',
                        bg=self.BTN_NORM, fg=self.FG_MAIN,
                        buttonbackground=self.BTN_NORM,
                        command=getattr(self, cmd)
-                       ).pack(side='left', padx=(0, 6))
+                       ).pack(side='top')
 
         self._toolbar_sep(inner)
 
         # ── Undo / Redo ──────────────────────────────────────────────
-        self._undo_btn = tk.Button(inner, text='↩',
-            font=(FONT_FAMILY, 13),
-            bg=self.BTN_NORM, fg=self.BTN_FG,
-            activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
-            relief='flat', width=3, pady=4, bd=0, cursor='hand2',
-            command=self._undo, state='disabled')
+        self._undo_btn = ttk.Button(inner, text='↩',
+            style='UndoRedo.TButton', command=self._undo,
+            state='disabled', cursor='hand2')
         self._undo_btn.pack(side='left', padx=1)
-        self._add_hover(self._undo_btn, self.BTN_HOV, self.FG_MAIN,
-                        self.BTN_NORM, self.BTN_FG)
-        self._add_tooltip(self._undo_btn, 'Rückgängig')
+        self._add_tooltip(self._undo_btn, 'Rückgängig  ⌘Z')
 
-        self._redo_btn = tk.Button(inner, text='↪',
-            font=(FONT_FAMILY, 13),
-            bg=self.BTN_NORM, fg=self.BTN_FG,
-            activebackground=self.BTN_HOV, activeforeground=self.FG_MAIN,
-            relief='flat', width=3, pady=4, bd=0, cursor='hand2',
-            command=self._redo, state='disabled')
+        self._redo_btn = ttk.Button(inner, text='↪',
+            style='UndoRedo.TButton', command=self._redo,
+            state='disabled', cursor='hand2')
         self._redo_btn.pack(side='left', padx=1)
-        self._add_hover(self._redo_btn, self.BTN_HOV, self.FG_MAIN,
-                        self.BTN_NORM, self.BTN_FG)
-        self._add_tooltip(self._redo_btn, 'Wiederherstellen')
+        self._add_tooltip(self._redo_btn, 'Wiederherstellen  ⌘Y')
 
-        # ── Bildgröße-Anzeige (rechts) ──────────────────────────────
+        # ── Bildgröße (rechts) ───────────────────────────────────────
         iw, ih = self.image.size
         self._size_label = tk.Label(
             inner, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
-            fg=self.FG_MUTED, font=(FONT_FAMILY, 8))
+            fg=self.FG_MUTED, font=(FONT_FAMILY, 9))
         self._size_label.pack(side='right', padx=(0, 4))
 
         self._select_tool('arrow')
@@ -1024,7 +1090,7 @@ class AnnotationEditor(_Theme):
     @staticmethod
     def _toolbar_sep(parent):
         tk.Frame(parent, bg='#CBD5E1', width=1).pack(
-            side='left', fill='y', padx=8, pady=4)
+            side='left', fill='y', padx=10, pady=2)
 
     def _build_canvas(self):
         frame = tk.Frame(self.win, bg=self.BG_MAIN)
@@ -1207,55 +1273,43 @@ class AnnotationEditor(_Theme):
                  font=(FONT_FAMILY, 8)).pack(side='left', padx=(4, 0))
 
     def _build_export_bar(self):
-        """Dark-Theme Export-Leiste – professionelles Erscheinungsbild."""
-        EBG   = self.EXPORT_BG     # Dark bar background
-        EBTN  = self.EXPORT_BTN    # Button background
-        EHOV  = self.EXPORT_HOV    # Button hover
-        EFG   = '#E2E8F0'          # Button text
-        EMUT  = '#94A3B8'          # Muted text
+        """Dark-Theme Export-Leiste mit ttk-Buttons."""
+        EBG  = self.EXPORT_BG
+        EMUT = '#94A3B8'
 
-        bar = tk.Frame(self.win, bg=EBG, height=50)
+        bar = tk.Frame(self.win, bg=EBG, height=54)
         bar.pack(side='bottom', fill='x')
         bar.pack_propagate(False)
 
         inner = tk.Frame(bar, bg=EBG)
-        inner.pack(fill='both', expand=True, padx=12, pady=8)
+        inner.pack(fill='both', expand=True, padx=14, pady=8)
 
-        # ── Linke Seite: Clipboard + Quick-Export ─────────────────────
+        # ── Links: Clipboard ──────────────────────────────────────────
         tk.Label(inner, text='EXPORT', bg=EBG, fg=EMUT,
                  font=(FONT_FAMILY, 7, 'bold')).pack(side='left',
-                                                      padx=(0, 10))
+                                                      padx=(0, 12))
 
-        clip_btn = tk.Button(inner, text='📋 Clipboard',
-                             font=(FONT_FAMILY, 9),
-                             bg=EBTN, fg=EFG,
-                             activebackground=EHOV, activeforeground='white',
-                             relief='flat', padx=10, pady=4, bd=0,
-                             cursor='hand2', command=self.copy_to_clipboard)
-        clip_btn.pack(side='left', padx=(0, 3))
-        self._add_hover(clip_btn, EHOV, 'white', EBTN, EFG)
+        ttk.Button(inner, text='📋 Clipboard', style='ExportClip.TButton',
+                   command=self.copy_to_clipboard, cursor='hand2'
+                   ).pack(side='left', padx=(0, 6))
 
         tk.Frame(inner, bg='#475569', width=1).pack(
             side='left', fill='y', padx=8, pady=2)
 
+        # ── Quick-Export Format-Buttons ───────────────────────────────
         for fmt, label in [('png', 'PNG'), ('jpg', 'JPG'), ('pdf', 'PDF')]:
-            btn = tk.Button(inner, text=label, font=(FONT_FAMILY, 9, 'bold'),
-                            bg=EBTN, fg=EFG,
-                            activebackground=EHOV, activeforeground='white',
-                            relief='flat', padx=12, pady=4, bd=0,
-                            cursor='hand2',
-                            command=lambda f=fmt: self._quick_save(f))
-            btn.pack(side='left', padx=2)
-            self._add_hover(btn, EHOV, 'white', EBTN, EFG)
+            ttk.Button(inner, text=label, style='Export.TButton',
+                       command=lambda f=fmt: self._quick_save(f),
+                       cursor='hand2').pack(side='left', padx=2)
 
-        # ── Mitte: Zielordner-Anzeige + Ändern ───────────────────────
+        # ── Zielordner ───────────────────────────────────────────────
         tk.Frame(inner, bg='#475569', width=1).pack(
             side='left', fill='y', padx=8, pady=2)
 
         short = self._short_path(self._settings['quick_save_dir'])
         self._save_dir_label = tk.Label(
             inner, text=f'📂 {short}', bg=EBG, fg=EMUT,
-            font=(FONT_FAMILY, 8), cursor='hand2')
+            font=(FONT_FAMILY, 9), cursor='hand2')
         self._save_dir_label.pack(side='left', padx=(0, 4))
         self._save_dir_label.bind('<Button-1>',
                                   lambda e: self._change_save_dir())
@@ -1263,18 +1317,12 @@ class AnnotationEditor(_Theme):
             lambda e: self._save_dir_label.config(fg='white'))
         self._save_dir_label.bind('<Leave>',
             lambda e: self._save_dir_label.config(fg=EMUT))
+        self._add_tooltip(self._save_dir_label, 'Zielordner ändern')
 
-        # ── Rechte Seite: Speichern unter … (Akzent) ─────────────────
-        save_as = tk.Button(inner, text='Speichern unter …',
-                            font=(FONT_FAMILY, 10, 'bold'),
-                            bg=self.ACCENT, fg='white',
-                            activebackground=self.ACCENT_HOV,
-                            activeforeground='white',
-                            relief='flat', padx=16, pady=4, bd=0,
-                            cursor='hand2', command=self.save_to_file)
-        save_as.pack(side='right', padx=(8, 0))
-        self._add_hover(save_as, self.ACCENT_HOV, 'white',
-                        self.ACCENT, 'white')
+        # ── Rechts: Speichern unter … ─────────────────────────────────
+        ttk.Button(inner, text='Speichern unter …', style='SaveAs.TButton',
+                   command=self.save_to_file, cursor='hand2'
+                   ).pack(side='right', padx=(8, 0))
 
     def _bind_shortcuts(self):
         # macOS: Command statt Control
@@ -1298,8 +1346,8 @@ class AnnotationEditor(_Theme):
     def _select_tool(self, tool_id: str):
         self.active_tool = tool_id
         for tid, btn in self._tool_buttons.items():
-            btn.config(bg=self.BTN_SEL if tid == tool_id else self.BTN_NORM,
-                       fg='white'     if tid == tool_id else self.BTN_FG)
+            btn.configure(style='ToolSel.TButton' if tid == tool_id
+                                else 'Tool.TButton')
         self._update_status()
 
     def _pick_color(self):
@@ -1611,11 +1659,11 @@ class AnnotationEditor(_Theme):
 
     def _update_undo_redo_state(self):
         if hasattr(self, '_undo_btn'):
-            self._undo_btn.config(
-                state='normal' if self.undo_stack else 'disabled')
+            self._undo_btn.state(
+                ['!disabled'] if self.undo_stack else ['disabled'])
         if hasattr(self, '_redo_btn'):
-            self._redo_btn.config(
-                state='normal' if self.redo_stack else 'disabled')
+            self._redo_btn.state(
+                ['!disabled'] if self.redo_stack else ['disabled'])
 
     # ------------------------------------------------------------------
     # Canvas-Redraw
