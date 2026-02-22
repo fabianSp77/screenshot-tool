@@ -847,10 +847,10 @@ class AnnotationEditor(_Theme):
         self._style = ttk.Style(self.win)
         self._style.theme_use('clam')
 
-        # ── Werkzeug-Buttons (Toolbar) ────────────────────────────────
+        # ── Werkzeug-Buttons (kompakt, Zeile 1) ──────────────────────
         self._style.configure('Tool.TButton',
-            font=(FONT_FAMILY, 14),
-            padding=(8, 6),
+            font=(FONT_FAMILY, 13),
+            padding=(6, 4),
             relief='flat',
             background=self.BTN_NORM,
             foreground=self.BTN_FG,
@@ -863,8 +863,8 @@ class AnnotationEditor(_Theme):
 
         # Werkzeug selektiert
         self._style.configure('ToolSel.TButton',
-            font=(FONT_FAMILY, 14),
-            padding=(8, 6),
+            font=(FONT_FAMILY, 13),
+            padding=(6, 4),
             relief='flat',
             background=self.ACCENT,
             foreground='white',
@@ -873,10 +873,10 @@ class AnnotationEditor(_Theme):
             background=[('active', self.ACCENT_HOV),
                         ('pressed', self.ACCENT_HOV)])
 
-        # ── Undo/Redo ────────────────────────────────────────────────
+        # ── Controls-Zeile: Undo/Redo ────────────────────────────────
         self._style.configure('UndoRedo.TButton',
-            font=(FONT_FAMILY, 13),
-            padding=(10, 6),
+            font=(FONT_FAMILY, 11),
+            padding=(8, 3),
             relief='flat',
             background=self.BTN_NORM,
             foreground=self.BTN_FG,
@@ -900,7 +900,7 @@ class AnnotationEditor(_Theme):
             foreground=[('active', 'white'),
                         ('pressed', 'white')])
 
-        # Clipboard-Button (etwas anders)
+        # Clipboard-Button
         self._style.configure('ExportClip.TButton',
             font=(FONT_FAMILY, 10),
             padding=(12, 7),
@@ -1004,34 +1004,41 @@ class AnnotationEditor(_Theme):
     def _build_toolbar(self):
         toolbar_wrap = tk.Frame(self.win, bg=self.BG_TOOLBAR)
         toolbar_wrap.pack(side='top', fill='x')
-        inner = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
-        inner.pack(fill='x', padx=10, pady=7)
-        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
-            side='bottom', fill='x')
 
-        # ── Werkzeuge ─────────────────────────────────────────────────
+        # ════════ Zeile 1: Werkzeuge ══════════════════════════════════
+        row1 = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
+        row1.pack(fill='x', padx=10, pady=(6, 0))
+
         self._tool_buttons: dict[str, ttk.Button] = {}
         for tool_id, symbol, label in self.TOOLS:
-            btn = ttk.Button(inner, text=symbol, style='Tool.TButton',
+            btn = ttk.Button(row1, text=symbol, style='Tool.TButton',
                              command=lambda t=tool_id: self._select_tool(t),
                              cursor='hand2')
             btn.pack(side='left', padx=1)
             self._tool_buttons[tool_id] = btn
             self._add_tooltip(btn, label)
 
-        self._toolbar_sep(inner)
+        # Bildgröße rechts in Zeile 1
+        iw, ih = self.image.size
+        self._size_label = tk.Label(
+            row1, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
+            fg=self.FG_MUTED, font=(FONT_FAMILY, 9))
+        self._size_label.pack(side='right', padx=(0, 4))
+
+        # Thin divider between rows
+        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
+            fill='x', padx=10, pady=0)
+
+        # ════════ Zeile 2: Controls ═══════════════════════════════════
+        row2 = tk.Frame(toolbar_wrap, bg=self.BG_TOOLBAR)
+        row2.pack(fill='x', padx=10, pady=(4, 6))
 
         # ── Farb-Swatch ──────────────────────────────────────────────
-        swatch_frame = tk.Frame(inner, bg=self.BG_TOOLBAR)
-        swatch_frame.pack(side='left', padx=4)
-        tk.Label(swatch_frame, text='Farbe', bg=self.BG_TOOLBAR,
-                 fg=self.FG_MUTED, font=(FONT_FAMILY, 7)
-                 ).pack(side='top')
         self._color_swatch = tk.Frame(
-            swatch_frame, bg=self.tool_color, width=28, height=20,
+            row2, bg=self.tool_color, width=32, height=22,
             highlightthickness=2, highlightbackground=self.DIVIDER,
             cursor='hand2')
-        self._color_swatch.pack(side='top')
+        self._color_swatch.pack(side='left', padx=(0, 4))
         self._color_swatch.pack_propagate(False)
         self._color_swatch.bind('<Button-1>', lambda e: self._pick_color())
         self._color_swatch.bind('<Enter>',
@@ -1040,57 +1047,53 @@ class AnnotationEditor(_Theme):
         self._color_swatch.bind('<Leave>',
             lambda e: self._color_swatch.config(
                 highlightbackground=self.DIVIDER))
+        self._add_tooltip(self._color_swatch, 'Farbe wählen')
 
-        self._toolbar_sep(inner)
+        self._toolbar_sep(row2)
 
-        # ── Strichbreite / Schrift / Blur ─────────────────────────────
+        # ── Strichbreite / Schrift / Blur (inline) ────────────────────
         for label_text, var_name, default, lo, hi, cmd in [
             ('Breite',  '_width_var', self.tool_width,  1, 20, '_update_width'),
             ('Schrift', '_font_var',  self.font_size,   8, 72, '_update_font'),
             ('Blur',    '_blur_var',  self.blur_radius,  1, 50, '_update_blur'),
         ]:
-            grp = tk.Frame(inner, bg=self.BG_TOOLBAR)
-            grp.pack(side='left', padx=2)
-            tk.Label(grp, text=label_text, bg=self.BG_TOOLBAR,
-                     fg=self.FG_MUTED, font=(FONT_FAMILY, 7)
-                     ).pack(side='top')
+            tk.Label(row2, text=label_text, bg=self.BG_TOOLBAR,
+                     fg=self.FG_MUTED, font=(FONT_FAMILY, 8)
+                     ).pack(side='left', padx=(4, 2))
             var = tk.IntVar(value=default)
             setattr(self, var_name, var)
-            tk.Spinbox(grp, from_=lo, to=hi, textvariable=var,
+            tk.Spinbox(row2, from_=lo, to=hi, textvariable=var,
                        width=3, font=(FONT_FAMILY, 9), relief='flat',
                        bg=self.BTN_NORM, fg=self.FG_MAIN,
                        buttonbackground=self.BTN_NORM,
                        command=getattr(self, cmd)
-                       ).pack(side='top')
+                       ).pack(side='left', padx=(0, 4))
 
-        self._toolbar_sep(inner)
+        self._toolbar_sep(row2)
 
         # ── Undo / Redo ──────────────────────────────────────────────
-        self._undo_btn = ttk.Button(inner, text='↩',
+        self._undo_btn = ttk.Button(row2, text='↩ Zurück',
             style='UndoRedo.TButton', command=self._undo,
             state='disabled', cursor='hand2')
-        self._undo_btn.pack(side='left', padx=1)
+        self._undo_btn.pack(side='left', padx=2)
         self._add_tooltip(self._undo_btn, 'Rückgängig  ⌘Z')
 
-        self._redo_btn = ttk.Button(inner, text='↪',
+        self._redo_btn = ttk.Button(row2, text='↪ Vor',
             style='UndoRedo.TButton', command=self._redo,
             state='disabled', cursor='hand2')
-        self._redo_btn.pack(side='left', padx=1)
+        self._redo_btn.pack(side='left', padx=2)
         self._add_tooltip(self._redo_btn, 'Wiederherstellen  ⌘Y')
 
-        # ── Bildgröße (rechts) ───────────────────────────────────────
-        iw, ih = self.image.size
-        self._size_label = tk.Label(
-            inner, text=f'{iw} × {ih} px', bg=self.BG_TOOLBAR,
-            fg=self.FG_MUTED, font=(FONT_FAMILY, 9))
-        self._size_label.pack(side='right', padx=(0, 4))
+        # Bottom divider
+        tk.Frame(toolbar_wrap, bg=self.DIVIDER, height=1).pack(
+            side='bottom', fill='x')
 
         self._select_tool('arrow')
 
     @staticmethod
     def _toolbar_sep(parent):
         tk.Frame(parent, bg='#CBD5E1', width=1).pack(
-            side='left', fill='y', padx=10, pady=2)
+            side='left', fill='y', padx=8, pady=1)
 
     def _build_canvas(self):
         frame = tk.Frame(self.win, bg=self.BG_MAIN)
