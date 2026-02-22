@@ -875,6 +875,9 @@ class AnnotationEditor(_Theme):
         parts = path.split(os.sep)
         return os.sep.join([parts[0], '…', parts[-1]])
 
+    # Mindestbreite damit alle Toolbar-Buttons + Controls sichtbar bleiben
+    MIN_EDITOR_W = 720
+
     def show(self, entry_id: str | None = None):
         self._current_entry_id = entry_id
         self.win = tk.Toplevel(self.parent)
@@ -883,9 +886,10 @@ class AnnotationEditor(_Theme):
 
         sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
         iw, ih = self.image.size
-        win_w  = min(iw + 120, int(sw * 0.9))
-        win_h  = min(ih + 230, int(sh * 0.92))
+        win_w  = max(self.MIN_EDITOR_W, min(iw + 120, int(sw * 0.9)))
+        win_h  = min(ih + 280, int(sh * 0.92))
         self.win.geometry(f'{win_w}x{win_h}')
+        self.win.minsize(self.MIN_EDITOR_W, 480)
 
         self._setup_styles()
         self._build_menu()
