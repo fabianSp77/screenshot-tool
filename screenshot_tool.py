@@ -1540,6 +1540,9 @@ class AnnotationEditor(_Theme):
                                  image=self._base_photo, tag='base')
         iw, ih = self.image.size
         self.canvas.config(scrollregion=(0, 0, iw, ih))
+        # Viewport auf (0,0) zurücksetzen (wichtig nach Crop)
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
         for ann in self.annotations:
             self._draw_annotation_on_canvas(ann)
 
@@ -1691,26 +1694,34 @@ class AnnotationEditor(_Theme):
     # Speichern / Clipboard
     # ------------------------------------------------------------------
 
+    def _save_image_to_path(self, img: Image.Image, path: str):
+        """Speichert ein PIL-Image in den angegebenen Pfad (PNG/JPG/PDF)."""
+        lp = path.lower()
+        if lp.endswith('.pdf'):
+            img.convert('RGB').save(path, 'PDF', resolution=150)
+        elif lp.endswith(('.jpg', '.jpeg')):
+            img.convert('RGB').save(path, quality=95)
+        else:
+            img.save(path)
+
     def _quick_save(self, fmt: str):
         """Schnell-Export als PNG/JPG/PDF auf den Desktop."""
         desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
         if not os.path.isdir(desktop):
             desktop = os.path.expanduser('~')
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'screenshot_{timestamp}.{fmt}'
+        filename = f'screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.{fmt}'
         path = os.path.join(desktop, filename)
 
-        img = self._composite_image()
+        self._status_var.set('Wird gespeichert …')
+        self.win.config(cursor='watch')
+        self.win.update_idletasks()
         try:
-            if fmt == 'pdf':
-                img.convert('RGB').save(path, 'PDF', resolution=150)
-            elif fmt == 'jpg':
-                img.convert('RGB').save(path, quality=95)
-            else:
-                img.save(path)
-            self._status_var.set(f'Gespeichert: {filename} (Desktop)')
+            self._save_image_to_path(self._composite_image(), path)
+            self._status_var.set(f'✓ {filename} (Desktop)')
         except Exception as e:
-            self._status_var.set(f'Fehler beim Speichern: {e}')
+            self._status_var.set(f'Fehler: {e}')
+        finally:
+            self.win.config(cursor='')
 
     def save_to_file(self):
         default = datetime.now().strftime('screenshot_%Y%m%d_%H%M%S.png')
@@ -1722,15 +1733,16 @@ class AnnotationEditor(_Theme):
                        ('Alle Dateien', '*.*')])
         if not path:
             return
-        img = self._composite_image()
-        if path.lower().endswith('.pdf'):
-            rgb = img.convert('RGB')
-            rgb.save(path, 'PDF', resolution=150)
-        elif path.lower().endswith(('.jpg', '.jpeg')):
-            img.convert('RGB').save(path, quality=95)
-        else:
-            img.save(path)
-        self._status_var.set(f'Gespeichert: {path}')
+        self._status_var.set('Wird gespeichert …')
+        self.win.config(cursor='watch')
+        self.win.update_idletasks()
+        try:
+            self._save_image_to_path(self._composite_image(), path)
+            self._status_var.set(f'✓ Gespeichert: {os.path.basename(path)}')
+        except Exception as e:
+            self._status_var.set(f'Fehler: {e}')
+        finally:
+            self.win.config(cursor='')
 
     def copy_to_clipboard(self):
         img = self._composite_image()
